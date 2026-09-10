@@ -1,0 +1,15 @@
+{
+  "indexes": [],
+  "fieldOverrides": [
+    { "collectionGroup": "providerProfile", "fieldPath": "verificationStatus", "indexes": [
+      { "order": "ASCENDING", "queryScope": "COLLECTION" },
+      { "order": "DESCENDING", "queryScope": "COLLECTION" },
+      { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+    ] },
+    { "collectionGroup": "towingCompanyProfile", "fieldPath": "verificationStatus", "indexes": [
+      { "order": "ASCENDING", "queryScope": "COLLECTION" },
+      { "order": "DESCENDING", "queryScope": "COLLECTION" },
+      { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+    ] }
+  ]
+}

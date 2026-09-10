@@ -1,0 +1,30 @@
+{
+  "name": "veresc-admin",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-veresc-admin \"node --test tests/firestore.rules.test.mjs\""
+  },
+  "dependencies": {
+    "firebase": "^12.0.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.0.0"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.0.0"
+  }
+}
