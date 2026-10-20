@@ -1,5 +1,14 @@
 {
-  "indexes": [],
+  "indexes": [
+    {
+      "collectionGroup": "providerListings",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "visibility", "order": "ASCENDING" },
+        { "fieldPath": "role", "order": "ASCENDING" }
+      ]
+    }
+  ],
   "fieldOverrides": [
     { "collectionGroup": "providerProfile", "fieldPath": "verificationStatus", "indexes": [
       { "order": "ASCENDING", "queryScope": "COLLECTION" },
@@ -7,6 +16,16 @@
       { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
     ] },
     { "collectionGroup": "towingCompanyProfile", "fieldPath": "verificationStatus", "indexes": [
+      { "order": "ASCENDING", "queryScope": "COLLECTION" },
+      { "order": "DESCENDING", "queryScope": "COLLECTION" },
+      { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+    ] },
+    { "collectionGroup": "ownerProfile", "fieldPath": "verificationStatus", "indexes": [
+      { "order": "ASCENDING", "queryScope": "COLLECTION" },
+      { "order": "DESCENDING", "queryScope": "COLLECTION" },
+      { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+    ] },
+    { "collectionGroup": "shopVerification", "fieldPath": "verificationStatus", "indexes": [
       { "order": "ASCENDING", "queryScope": "COLLECTION" },
       { "order": "DESCENDING", "queryScope": "COLLECTION" },
       { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }

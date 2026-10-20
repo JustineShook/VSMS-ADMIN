@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bell, ChevronDown, Menu, Search, UserRound } from 'lucide-react';
 import { Avatar } from './Avatar';
-export function Header({ name, email, onMenu }: { name: string; email: string; onMenu: () => void }) {
+export function Header({ name, email, onMenu, onNotifications, unreadCount = 0, title = 'Dashboard' }: { name: string; email: string; onMenu: () => void; onNotifications: () => void; unreadCount?: number; title?: string }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -13,11 +13,11 @@ export function Header({ name, email, onMenu }: { name: string; email: string; o
     return () => { document.removeEventListener('pointerdown', dismiss); document.removeEventListener('keydown', escape); };
   }, [open]);
   return <header className="flex h-20 shrink-0 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4 sm:px-8">
-    <div className="flex items-center gap-3"><button className="admin-icon lg:hidden" onClick={onMenu} aria-label="Open navigation"><Menu size={21} /></button><h1 className="text-lg font-semibold tracking-tight">Dashboard</h1></div>
+    <div className="flex items-center gap-3"><button className="admin-icon lg:hidden" onClick={onMenu} aria-label="Open navigation"><Menu size={21} /></button><h1 className="text-lg font-semibold tracking-tight">{title}</h1></div>
     <div className="flex items-center gap-2 sm:gap-5">
       <label className="hidden items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-slate-400 md:flex"><Search size={16} /><input className="w-36 bg-transparent text-xs outline-none lg:w-44" placeholder="Search workspace…" aria-label="Search workspace (preview only)" disabled /><span className="text-[9px]">PREVIEW</span></label>
-      <button className="admin-icon" disabled aria-label="Notifications (preview only)" title="Notifications — preview only"><Bell size={19} /></button>
-      <div ref={root} className="relative border-l border-slate-200 pl-3 sm:pl-5">
+      <button className="admin-icon relative" onClick={onNotifications} aria-label={unreadCount ? `Notifications, ${unreadCount} unread` : 'Notifications'} title="Admin notifications"><Bell size={19} />{unreadCount > 0 && <span className="absolute -right-1 -top-1 inline-flex min-h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[9px] font-semibold text-white">{unreadCount > 99 ? '99+' : unreadCount}</span>}</button>
+      <div id="admin-account" ref={root} className="relative scroll-mt-6 border-l border-slate-200 pl-3 sm:pl-5">
         <button ref={trigger} className="flex items-center gap-2.5 rounded-md" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="admin-profile-panel" aria-label="Toggle admin profile">
           <Avatar name={name} /><span className="hidden max-w-36 truncate text-xs font-semibold sm:block">{name}</span><ChevronDown size={14} className="text-slate-400" />
         </button>

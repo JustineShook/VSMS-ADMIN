@@ -1,4 +1,4 @@
-export type ProviderRole = 'onsite-mechanic' | 'shop-owner' | 'towing-company';
+export type ProviderRole = 'onsite-mechanic' | 'shop-owner' | 'towing-company' | 'homegarage' | 'owner';
 export type ProfileData = Record<string, unknown>;
 export interface Application {
   path: string;

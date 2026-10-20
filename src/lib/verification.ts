@@ -1,7 +1,7 @@
 import type { Application, ProfileData, ProviderRole } from '../types/verification';
 
 export const roleLabels: Record<ProviderRole, string> = {
-  'onsite-mechanic': 'Onsite mechanic', 'shop-owner': 'Auto shop', 'towing-company': 'Towing company',
+  'onsite-mechanic': 'Onsite mechanic', 'shop-owner': 'Auto shop', 'towing-company': 'Towing company', homegarage: 'Home Garage', owner: 'Vehicle owner',
 };
 export function field(data: ProfileData, path: string): unknown {
   return path.split('.').reduce<unknown>((value, key) => value && typeof value === 'object' ? (value as ProfileData)[key] : undefined, data);
@@ -21,15 +21,19 @@ export function dateLabel(value: unknown): string {
 }
 export function applicationFrom(path: string, data: ProfileData): Application | null {
   const pieces = path.split('/');
-  const role = pieces.length === 2 && pieces[0] === 'providers' ? 'shop-owner'
+  const legacyShopPath = pieces.length === 2 && pieces[0] === 'providers';
+  const role = legacyShopPath ? 'shop-owner'
     : pieces.length === 4 && pieces[0] === 'users' && pieces[3] === 'profile'
-      ? pieces[2] === 'providerProfile' ? 'onsite-mechanic' : pieces[2] === 'towingCompanyProfile' ? 'towing-company' : null
+      ? pieces[2] === 'providerProfile' ? 'onsite-mechanic' : pieces[2] === 'towingCompanyProfile' ? 'towing-company' : pieces[2] === 'ownerProfile' ? 'owner' : pieces[2] === 'shopVerification' ? 'shop-owner' : pieces[2] === 'homeGarageVerification' ? 'homegarage' : null
       : null;
   if (!role || data.role !== role || data.uid !== pieces[1]) return null;
-  const legacy = role === 'shop-owner' && data.verificationStatus === undefined;
-  if (role === 'shop-owner' && data.verified !== false) return null;
+  const legacy = legacyShopPath && data.verificationStatus === undefined;
+  if (legacyShopPath && data.verified !== false) return null;
   if (data.verificationStatus !== 'PENDING' && !legacy) return null;
-  const name = field(data, role === 'shop-owner' ? 'businessName' : role === 'towing-company' ? 'company.companyName' : 'personal.fullName');
+  const name = role === 'shop-owner' || role === 'homegarage' ? data.businessName ?? field(data, 'personal.fullName') ?? data.name ?? data.displayName
+    : role === 'towing-company' ? field(data, 'company.companyName')
+      : role === 'owner' ? field(data, 'personal.fullName') ?? data.fullName ?? data.name ?? data.displayName
+        : field(data, 'personal.fullName');
   return { path, uid: pieces[1], role, name: display(name), submitted: dateLabel(data.submittedAt), legacy, data };
 }
 export function sameSubmission(left: unknown, right: unknown): boolean {

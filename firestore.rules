@@ -10,9 +10,9 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == uid;
     }
 
-    // VeResc Admin: claims are issued by trusted Admin SDK tooling, never roles alone.
     function isAdmin() {
-      return signedIn() && request.auth.token.admin == true;
+      return signedIn()
+        && request.auth.token.admin == true;
     }
 
     function listingHiddenAfterReview(uid) {
@@ -20,67 +20,237 @@ service cloud.firestore {
       return !existsAfter(listing) || getAfter(listing).data.visibility == "inactive";
     }
 
-    function validAdminReview(uid, role, shop) {
-      let before = resource.data;
-      let after = request.resource.data;
-      return isAdmin()
-        && before.uid == uid && before.role == role
-        && get(/databases/$(database)/documents/users/$(uid)).data.role == role
-        && (before.get('verificationStatus', '') == 'PENDING'
-          || (shop && !('verificationStatus' in before) && before.verified == false))
-        && (!shop || before.verified == false)
-        && after.diff(before).affectedKeys().hasOnly([
-          'verificationStatus', 'reviewedAt', 'reviewedBy', 'rejectionReason', 'verified'
-        ])
-        && (shop || !after.diff(before).affectedKeys().hasAny(['verified']))
-        && after.verificationStatus in ['VERIFIED', 'REJECTED']
-        && after.reviewedAt == request.time && after.reviewedBy == request.auth.uid
-        && after.rejectionReason is string
-        && ((after.verificationStatus == 'VERIFIED' && after.rejectionReason == '')
-          || (after.verificationStatus == 'REJECTED' && after.rejectionReason.size() >= 5 && after.rejectionReason.size() <= 500))
-        && (!shop || after.verified == (after.verificationStatus == 'VERIFIED'))
-        && listingHiddenAfterReview(uid);
-    }
-
-    function validShopReview(uid) {
-      let shop = request.resource.data;
-      return validAdminReview(uid, 'shop-owner', true)
-        && (shop.verificationStatus == 'REJECTED' || (
-          shop.businessName is string && shop.businessName.size() > 0
-          && shop.businessName != 'Unnamed Auto Shop'
-          && shop.phone is string && shop.phone.size() > 0
-          && shop.address is string && shop.address.size() > 0
-          && shop.latitude is number && shop.latitude >= -90 && shop.latitude <= 90
-          && shop.longitude is number && shop.longitude >= -180 && shop.longitude <= 180
-          && !(shop.latitude == 0 && shop.longitude == 0)));
-    }
-
     function adminReviewedProfile(path) {
       return existsAfter(path)
-        && getAfter(path).data.verificationStatus in ['VERIFIED', 'REJECTED']
+        && getAfter(path).data.verificationStatus in ["VERIFIED", "REJECTED"]
         && getAfter(path).data.reviewedAt == request.time
         && getAfter(path).data.reviewedBy == request.auth.uid;
     }
 
     function validAdminListingHide(uid) {
+      let userPath = /databases/$(database)/documents/users/$(uid);
       return isAdmin()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['visibility'])
-        && request.resource.data.visibility == 'inactive'
-        && (adminReviewedProfile(/databases/$(database)/documents/users/$(uid)/providerProfile/profile)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["visibility"])
+        && request.resource.data.visibility == "inactive"
+        && (adminReviewedProfile(/databases/$(database)/documents/users/$(uid)/ownerProfile/profile)
+          || adminReviewedProfile(/databases/$(database)/documents/users/$(uid)/providerProfile/profile)
           || adminReviewedProfile(/databases/$(database)/documents/users/$(uid)/towingCompanyProfile/profile)
-          || adminReviewedProfile(/databases/$(database)/documents/providers/$(uid)));
+          || adminReviewedProfile(/databases/$(database)/documents/users/$(uid)/shopVerification/profile)
+          || adminReviewedProfile(/databases/$(database)/documents/users/$(uid)/homeGarageVerification/profile)
+          || adminReviewedProfile(/databases/$(database)/documents/providers/$(uid))
+          || (existsAfter(userPath)
+            && getAfter(userPath).data.accountStatus == "suspended"
+            && getAfter(userPath).data.accountStatusUpdatedAt == request.time
+            && getAfter(userPath).data.accountStatusUpdatedBy == request.auth.uid));
     }
 
-    // Collection-group permissions are READ ONLY and limited to pending submissions.
-    match /{path=**}/providerProfile/{profileId} {
-      allow list: if isAdmin() && resource.data.verificationStatus == 'PENDING';
+    function validShopReview(uid) {
+      let shop = request.resource.data;
+      let verification = getAfter(/databases/$(database)/documents/users/$(uid)/shopVerification/profile).data;
+      return validAdminReview(uid, "shop-owner", true)
+        && (shop.verificationStatus == "REJECTED" || (
+          shop.businessName is string && shop.businessName.size() > 0
+          && shop.businessName != "Unnamed Auto Shop"
+          && shop.phone is string && shop.phone.size() > 0
+          && shop.address is string && shop.address.size() > 0
+          && shop.latitude is number && shop.latitude >= -90 && shop.latitude <= 90
+          && shop.longitude is number && shop.longitude >= -180 && shop.longitude <= 180
+          && shop.businessName == verification.business.name
+          && shop.phone == verification.business.phone
+          && shop.address == verification.business.address
+          && shop.latitude == verification.business.latitude
+          && shop.longitude == verification.business.longitude
+          && !(shop.latitude == 0 && shop.longitude == 0)));
     }
-    match /{path=**}/towingCompanyProfile/{profileId} {
-      allow list: if isAdmin() && resource.data.verificationStatus == 'PENDING';
+
+    function validProviderStatusHistory() {
+      let event = request.resource.data;
+      let account = getAfter(/databases/$(database)/documents/users/$(event.providerId)).data;
+      return isAdmin()
+        && event.keys().hasOnly(["providerId", "role", "previousStatus", "newStatus", "changedAt", "changedBy"])
+        && event.providerId is string
+        && event.role in ["onsite-mechanic", "shop-owner", "towing-company", "homegarage", "owner"]
+        && event.previousStatus in ["active", "suspended"]
+        && event.newStatus in ["active", "suspended"]
+        && event.newStatus != event.previousStatus
+        && event.changedAt == request.time
+        && event.changedBy == request.auth.uid
+        && account.uid == event.providerId
+        && account.role == event.role
+        && account.accountStatus == event.newStatus
+        && account.accountStatusUpdatedAt == request.time
+        && account.accountStatusUpdatedBy == request.auth.uid;
+    }
+
+    function validProviderVerificationHistory() {
+      let event = request.resource.data;
+      return isAdmin()
+        && event.keys().hasOnly(["providerId", "providerName", "role", "decision", "reviewedAt", "reviewedBy"])
+        && event.providerId is string
+        && event.providerName is string
+        && event.role in ["onsite-mechanic", "shop-owner", "towing-company", "homegarage", "owner"]
+        && event.decision in ["VERIFIED", "REJECTED"]
+        && event.reviewedAt == request.time
+        && event.reviewedBy == request.auth.uid
+        && ((event.role == "owner"
+            && existsAfter(/databases/$(database)/documents/users/$(event.providerId)/ownerProfile/profile)
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/ownerProfile/profile).data.verificationStatus == event.decision
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/ownerProfile/profile).data.reviewedAt == request.time
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/ownerProfile/profile).data.reviewedBy == request.auth.uid)
+          || (event.role == "onsite-mechanic"
+            && existsAfter(/databases/$(database)/documents/users/$(event.providerId)/providerProfile/profile)
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/providerProfile/profile).data.verificationStatus == event.decision
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/providerProfile/profile).data.reviewedAt == request.time
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/providerProfile/profile).data.reviewedBy == request.auth.uid)
+          || (event.role == "towing-company"
+            && existsAfter(/databases/$(database)/documents/users/$(event.providerId)/towingCompanyProfile/profile)
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/towingCompanyProfile/profile).data.verificationStatus == event.decision
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/towingCompanyProfile/profile).data.reviewedAt == request.time
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/towingCompanyProfile/profile).data.reviewedBy == request.auth.uid)
+          || (event.role == "shop-owner"
+            && existsAfter(/databases/$(database)/documents/providers/$(event.providerId))
+            && getAfter(/databases/$(database)/documents/providers/$(event.providerId)).data.verificationStatus == event.decision
+            && getAfter(/databases/$(database)/documents/providers/$(event.providerId)).data.reviewedAt == request.time
+            && getAfter(/databases/$(database)/documents/providers/$(event.providerId)).data.reviewedBy == request.auth.uid)
+          || (event.role == "homegarage"
+            && existsAfter(/databases/$(database)/documents/users/$(event.providerId)/homeGarageVerification/profile)
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/homeGarageVerification/profile).data.verificationStatus == event.decision
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/homeGarageVerification/profile).data.reviewedAt == request.time
+            && getAfter(/databases/$(database)/documents/users/$(event.providerId)/homeGarageVerification/profile).data.reviewedBy == request.auth.uid));
+    }
+
+    function matchingStatusNotificationAfter(uid, role, status) {
+      let profile = request.resource.data;
+      let notificationPath = /databases/$(database)/documents/users/$(uid)/accountStatusNotifications/$(profile.lastStatusNotificationId);
+      return isAdmin()
+        && profile.lastStatusNotificationId is string
+        && profile.reviewedAt == request.time
+        && profile.reviewedBy == request.auth.uid
+        && existsAfter(notificationPath)
+        && getAfter(notificationPath).data.notificationId == profile.lastStatusNotificationId
+        && getAfter(notificationPath).data.providerId == uid
+        && getAfter(notificationPath).data.providerRole == role
+        && getAfter(notificationPath).data.status == status
+        && getAfter(notificationPath).data.isRead == false
+        && getAfter(notificationPath).data.readAt == null
+        && getAfter(notificationPath).data.createdAt == request.time
+        && getAfter(notificationPath).data.updatedAt == request.time;
+    }
+
+    function validAdminAccountStatusNotification(uid, notificationId) {
+      let event = request.resource.data;
+      let userPath = /databases/$(database)/documents/users/$(uid);
+      return isAdmin()
+        && event.keys().hasOnly([
+          "notificationId", "providerId", "providerRole", "status", "previousStatus", "title", "message", "reason",
+          "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && event.notificationId == notificationId
+        && event.providerId == uid
+        && event.providerRole in ["onsite-mechanic", "shop-owner", "towing-company", "homegarage", "owner"]
+        && event.status in ["SUSPENDED", "ACTIVE"]
+        && (!event.keys().hasAny(["previousStatus"])
+          || event.previousStatus == null
+          || (event.previousStatus is string && event.previousStatus.size() <= 20))
+        && event.title is string && event.message is string
+        && (event.reason == null || (event.reason is string && event.reason.size() <= 500))
+        && event.isRead == false && event.readAt == null
+        && event.createdAt == request.time && event.updatedAt == request.time
+        && get(userPath).data.role == event.providerRole
+        && get(userPath).data.get("accountStatus", "active") != (event.status == "SUSPENDED" ? "suspended" : "active")
+        && getAfter(userPath).data.role == event.providerRole
+        && getAfter(userPath).data.accountStatus == (event.status == "SUSPENDED" ? "suspended" : "active")
+        && getAfter(userPath).data.accountStatusUpdatedAt == request.time
+        && getAfter(userPath).data.accountStatusUpdatedBy == request.auth.uid
+        && getAfter(userPath).data.accountStatusNotificationId == notificationId;
+    }
+
+    function validAdminVerificationNotification(uid, notificationId) {
+      let event = request.resource.data;
+      let profilePath = event.providerRole == "owner"
+        ? /databases/$(database)/documents/users/$(uid)/ownerProfile/profile
+        : event.providerRole == "onsite-mechanic"
+          ? /databases/$(database)/documents/users/$(uid)/providerProfile/profile
+          : event.providerRole == "towing-company"
+            ? /databases/$(database)/documents/users/$(uid)/towingCompanyProfile/profile
+            : event.providerRole == "homegarage"
+              ? /databases/$(database)/documents/users/$(uid)/homeGarageVerification/profile
+              : /databases/$(database)/documents/providers/$(uid);
+      let beforeProfile = get(profilePath).data;
+      let afterProfile = getAfter(profilePath).data;
+      return isAdmin()
+        && event.keys().hasOnly([
+          "notificationId", "providerId", "providerRole", "status", "previousStatus", "title", "message", "reason",
+          "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && event.notificationId == notificationId
+        && event.providerId == uid
+        && event.providerRole in ["onsite-mechanic", "shop-owner", "towing-company", "homegarage", "owner"]
+        && event.status in ["VERIFIED", "REJECTED"]
+        && (!event.keys().hasAny(["previousStatus"])
+          || event.previousStatus == null
+          || (event.previousStatus is string && event.previousStatus.size() <= 20))
+        && event.title is string && event.message is string
+        && (event.reason == null || (event.reason is string && event.reason.size() <= 500))
+        && event.isRead == false && event.readAt == null
+        && event.createdAt == request.time && event.updatedAt == request.time
+        && beforeProfile.get("verificationStatus", "") != event.status
+        && afterProfile.verificationStatus == event.status
+        && afterProfile.reviewedBy == request.auth.uid
+        && afterProfile.reviewedAt == request.time
+        && afterProfile.lastStatusNotificationId == notificationId;
     }
 
     function isPendingVerificationSubmission() {
       return request.resource.data.verificationStatus == "PENDING";
+    }
+
+    function validAdminReview(uid, role, shop) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let notificationPath = /databases/$(database)/documents/users/$(uid)/accountStatusNotifications/$(after.lastStatusNotificationId);
+      return isAdmin()
+        && before.uid == uid && before.role == role
+        && get(/databases/$(database)/documents/users/$(uid)).data.role == role
+        && (before.get("verificationStatus", "") == "PENDING"
+          || (shop && !("verificationStatus" in before) && before.verified == false))
+        && (!shop || before.verified == false)
+        && after.diff(before).affectedKeys().hasOnly(shop
+          ? ["verificationStatus", "reviewedAt", "reviewedBy", "rejectionReason", "verified", "lastStatusNotificationId",
+            "businessName", "phone", "address", "latitude", "longitude"]
+          : ["verificationStatus", "reviewedAt", "reviewedBy", "rejectionReason", "verified", "lastStatusNotificationId"])
+        && (shop || !after.diff(before).affectedKeys().hasAny(["verified"]))
+        && after.verificationStatus in ["VERIFIED", "REJECTED"]
+        && after.reviewedAt == request.time && after.reviewedBy == request.auth.uid
+        && after.lastStatusNotificationId is string
+        && existsAfter(notificationPath)
+        && getAfter(notificationPath).data.status == after.verificationStatus
+        && getAfter(notificationPath).data.providerId == uid
+        && getAfter(notificationPath).data.providerRole == role
+        && ((after.verificationStatus == "VERIFIED" && after.rejectionReason == "")
+          || (after.verificationStatus == "REJECTED" && after.rejectionReason is string && after.rejectionReason.size() >= 5 && after.rejectionReason.size() <= 500))
+        && (!shop || after.verified == (after.verificationStatus == "VERIFIED"))
+        && listingHiddenAfterReview(uid);
+    }
+
+    function validAdminAccountStatus(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let notificationPath = /databases/$(database)/documents/users/$(uid)/accountStatusNotifications/$(after.accountStatusNotificationId);
+      return isAdmin()
+        && before.uid == uid
+        && before.role in ["onsite-mechanic", "shop-owner", "towing-company", "homegarage", "owner"]
+        && after.role == before.role && after.uid == before.uid
+        && after.diff(before).affectedKeys().hasOnly(["accountStatus", "accountStatusUpdatedAt", "accountStatusUpdatedBy", "accountStatusNotificationId"])
+        && after.accountStatus in ["active", "suspended"]
+        && after.accountStatus != before.get("accountStatus", "active")
+        && after.accountStatusUpdatedAt == request.time
+        && after.accountStatusUpdatedBy == request.auth.uid
+        && after.accountStatusNotificationId is string
+        && existsAfter(notificationPath)
+        && getAfter(notificationPath).data.status == (after.accountStatus == "suspended" ? "SUSPENDED" : "ACTIVE")
+        && getAfter(notificationPath).data.providerId == uid
+        && getAfter(notificationPath).data.providerRole == before.role;
     }
 
     function verifiedMechanic(uid) {
@@ -99,12 +269,20 @@ service cloud.firestore {
         && get(profilePath).data.verificationStatus == "VERIFIED";
     }
 
+    function verifiedHomeGarage(uid) {
+      let profilePath = /databases/$(database)/documents/users/$(uid)/homeGarageVerification/profile;
+      return exists(profilePath)
+        && get(profilePath).data.uid == request.auth.uid
+        && get(profilePath).data.role == "homegarage"
+        && get(profilePath).data.verificationStatus == "VERIFIED";
+    }
+
     function hasExactPublicListingShape() {
       return request.resource.data.keys().hasOnly([
           "providerId", "role", "category", "businessName", "location",
           "availability", "visibility", "ratingSummary", "services",
-          "vehicleTypes", "serviceAreaLabel", "startingPrice", "operatingHours",
-          "emergencyServiceAvailable"
+          "vehicleTypes", "serviceAreaLabel", "description", "contactPhone", "startingPrice", "operatingHours",
+          "emergencyServiceAvailable", "photoUrls", "hoursType", "is24Hours", "weeklyHours", "totalSlots", "availableSlots"
         ])
         && request.resource.data.location.keys().hasOnly(["latitude", "longitude"])
         && request.resource.data.ratingSummary.keys().hasOnly(["average", "count"]);
@@ -127,12 +305,21 @@ service cloud.firestore {
         && request.resource.data.serviceAreaLabel is string
         && request.resource.data.serviceAreaLabel.size() >= 2
         && request.resource.data.serviceAreaLabel.size() <= 120
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 600
+        && (!request.resource.data.keys().hasAny(["contactPhone"])
+          || (request.resource.data.contactPhone is string
+            && request.resource.data.contactPhone.size() >= 7
+            && request.resource.data.contactPhone.size() <= 30))
         && request.resource.data.operatingHours is string
         && request.resource.data.operatingHours.size() >= 2
-        && request.resource.data.operatingHours.size() <= 120
+        && request.resource.data.operatingHours.size() <= 200
         && request.resource.data.services is list
         && request.resource.data.services.size() >= 1
-        && request.resource.data.services.size() <= 6
+        && ((request.resource.data.role == "shop-owner"
+              && request.resource.data.services.size() <= 7)
+          || (request.resource.data.role != "shop-owner"
+              && request.resource.data.services.size() <= 6))
         && request.resource.data.vehicleTypes is list
         && request.resource.data.vehicleTypes.size() >= 1
         && request.resource.data.vehicleTypes.size() <= 6
@@ -144,7 +331,17 @@ service cloud.firestore {
           || (request.resource.data.startingPrice is number
             && request.resource.data.startingPrice >= 0
             && request.resource.data.startingPrice <= 1000000))
-        && request.resource.data.emergencyServiceAvailable is bool;
+        && request.resource.data.emergencyServiceAvailable is bool
+        && (!request.resource.data.keys().hasAny(["photoUrls"])
+          || (request.resource.data.photoUrls is list
+            && request.resource.data.photoUrls.size() <= 3))
+        && (request.resource.data.role != "homegarage"
+          || (request.resource.data.totalSlots is int
+            && request.resource.data.totalSlots >= 1
+            && request.resource.data.totalSlots <= 500
+            && request.resource.data.availableSlots is int
+            && request.resource.data.availableSlots >= 0
+            && request.resource.data.availableSlots <= request.resource.data.totalSlots));
     }
 
     function hasFixedMapCompatibilityFields(uid) {
@@ -156,15 +353,24 @@ service cloud.firestore {
     }
 
     function hasValidRoleSpecificServices() {
-      return (request.resource.data.role in ["onsite-mechanic", "shop-owner"]
+      return (request.resource.data.role == "onsite-mechanic"
           && request.resource.data.services.hasOnly([
             "Engine Diagnostics", "Battery Replacement", "Brake Repair",
             "Tire Replacement", "Electrical Repair", "Air Conditioning"
+          ]))
+        || (request.resource.data.role == "shop-owner"
+          && request.resource.data.services.hasOnly([
+            "Oil change", "Brake service", "Engine repair", "Battery service",
+            "Tire service", "Air-conditioning service", "Preventive maintenance"
           ]))
         || (request.resource.data.role == "towing-company"
           && request.resource.data.services.hasOnly([
             "Flatbed Towing", "Wheel-Lift Towing", "Emergency Roadside Assistance",
             "Accident Recovery", "Motorcycle Towing"
+          ]))
+        || (request.resource.data.role == "homegarage"
+          && request.resource.data.services.hasOnly([
+            "Parking"
           ]));
     }
 
@@ -178,7 +384,12 @@ service cloud.firestore {
         || (request.resource.data.role == "shop-owner"
           && request.resource.data.category == "Auto Shops"
           && verifiedShop(uid)
-          && validShopListingProfile(uid));
+          && validShopListingProfile(uid))
+        || (request.resource.data.role == "homegarage"
+          && request.resource.data.category == "Parking Lots"
+          && get(/databases/$(database)/documents/users/$(uid)).data.role == "homegarage"
+          && verifiedHomeGarage(uid)
+          && validHomeGarageListingProfile(uid));
     }
 
     function validPublicListingWrite(uid) {
@@ -191,8 +402,14 @@ service cloud.firestore {
         && hasVerifiedRoleAndCategory(uid);
     }
 
+    function verifiedVehicleOwner(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data.role == "owner"
+        && get(/databases/$(database)/documents/users/$(uid)/ownerProfile/profile).data.verificationStatus == "VERIFIED";
+    }
+
     function validBookingBase() {
       return signedIn()
+        && verifiedVehicleOwner(request.auth.uid)
         && request.resource.data.customerId == request.auth.uid
         && request.resource.data.customerId is string
         && request.resource.data.providerId is string
@@ -202,6 +419,12 @@ service cloud.firestore {
         && request.resource.data.customerName.size() <= 120
         && request.resource.data.customerEmail is string
         && request.resource.data.customerEmail.size() <= 254
+        && (!request.resource.data.keys().hasAny(["customerPhone"])
+          || (request.resource.data.customerPhone is string
+            && request.resource.data.customerPhone.size() <= 30))
+        && (!request.resource.data.keys().hasAny(["customerAddress"])
+          || (request.resource.data.customerAddress is string
+            && request.resource.data.customerAddress.size() <= 300))
         && request.resource.data.providerName is string
         && request.resource.data.providerName.size() > 0
         && request.resource.data.providerName.size() <= 120
@@ -236,17 +459,349 @@ service cloud.firestore {
       return listing.data.providerId == request.resource.data.providerId
         && listing.data.businessName == request.resource.data.providerName
         && listing.data.visibility == "active"
+        && listing.data.availability == "available"
         && listing.data.role == request.resource.data.bookingType;
+    }
+
+    function validCustomerNotificationCreate(uid, notificationId) {
+      let bookingPath = /databases/$(database)/documents/bookings/$(request.resource.data.bookingId);
+      let previousBooking = get(bookingPath).data;
+      let updatedBooking = getAfter(bookingPath).data;
+      return signedIn()
+        && request.resource.data.keys().hasOnly([
+          "customerId", "bookingId", "bookingType", "providerId", "providerName",
+          "status", "title", "message", "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && request.resource.data.customerId == uid
+        && request.resource.data.bookingId is string
+        && request.resource.data.bookingType in ["onsite-mechanic", "towing-company", "shop-owner"]
+        && request.resource.data.providerId == updatedBooking.providerId
+        && request.resource.data.providerName is string
+        && request.resource.data.providerName.size() <= 120
+        && request.resource.data.status is string
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 300
+        && request.resource.data.isRead == false
+        && request.resource.data.readAt == null
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && notificationId == request.resource.data.bookingId
+        && exists(bookingPath)
+        && existsAfter(bookingPath)
+        && previousBooking.customerId == uid
+        && previousBooking.providerId == updatedBooking.providerId
+        && previousBooking.status != request.resource.data.status
+        && updatedBooking.customerId == uid
+        && updatedBooking.providerId == request.resource.data.providerId
+        && updatedBooking.providerName == request.resource.data.providerName
+        && updatedBooking.bookingType == request.resource.data.bookingType
+        && updatedBooking.status == request.resource.data.status
+        && (request.auth.uid == updatedBooking.providerId
+          || (request.auth.uid == uid
+            && request.resource.data.bookingType in ["onsite-mechanic", "towing-company"]
+            && previousBooking.status in ["pending", "accepted"]
+            && updatedBooking.status == "cancelled"));
+    }
+
+    function validCustomerNotificationUpdate(uid, notificationId) {
+      let bookingPath = /databases/$(database)/documents/bookings/$(request.resource.data.bookingId);
+      let previousBooking = get(bookingPath).data;
+      let updatedBooking = getAfter(bookingPath).data;
+      return signedIn()
+        && resource.data.customerId == uid
+        && request.resource.data.customerId == uid
+        && request.resource.data.bookingId is string
+        && request.resource.data.bookingId == resource.data.bookingId
+        && notificationId == request.resource.data.bookingId
+        && request.resource.data.bookingType == resource.data.bookingType
+        && request.resource.data.providerId == resource.data.providerId
+        && request.resource.data.providerName == resource.data.providerName
+        && request.resource.data.bookingType in ["onsite-mechanic", "towing-company", "shop-owner"]
+        && request.resource.data.status is string
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 300
+        && request.resource.data.isRead == false
+        && request.resource.data.readAt == null
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "title", "message", "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && exists(bookingPath)
+        && existsAfter(bookingPath)
+        && previousBooking.customerId == uid
+        && previousBooking.providerId == updatedBooking.providerId
+        && previousBooking.status != request.resource.data.status
+        && updatedBooking.customerId == uid
+        && updatedBooking.providerId == request.resource.data.providerId
+        && updatedBooking.providerName == request.resource.data.providerName
+        && updatedBooking.bookingType == request.resource.data.bookingType
+        && updatedBooking.status == request.resource.data.status
+        && (request.auth.uid == updatedBooking.providerId
+          || (request.auth.uid == uid
+            && request.resource.data.bookingType in ["onsite-mechanic", "towing-company"]
+            && previousBooking.status in ["pending", "accepted"]
+            && updatedBooking.status == "cancelled"));
+    }
+
+    function validMechanicNotificationCreate(uid, notificationId) {
+      let bookingPath = /databases/$(database)/documents/bookings/$(request.resource.data.bookingId);
+      let updatedBooking = getAfter(bookingPath).data;
+      return signedIn()
+        && request.resource.data.keys().hasOnly([
+          "bookingId", "providerId", "customerId", "customerName", "vehicle", "status",
+          "title", "message", "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && request.resource.data.bookingId is string
+        && notificationId == request.resource.data.bookingId
+        && request.resource.data.providerId == uid
+        && request.resource.data.customerId == updatedBooking.customerId
+        && request.resource.data.customerName == updatedBooking.customerName
+        && request.resource.data.vehicle == updatedBooking.vehicle
+        && request.resource.data.status == updatedBooking.status
+        && updatedBooking.providerId == uid
+        && updatedBooking.bookingType == "onsite-mechanic"
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 300
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && existsAfter(bookingPath)
+        && ((request.resource.data.isRead == false
+            && request.resource.data.readAt == null
+            && !exists(bookingPath)
+            && request.auth.uid == updatedBooking.customerId
+            && updatedBooking.status == "pending"
+            && request.resource.data.title == "New service request")
+          || (exists(bookingPath)
+            && get(bookingPath).data.status != updatedBooking.status
+            && ((request.auth.uid == uid
+                && request.resource.data.isRead == true
+                && request.resource.data.readAt == request.time
+                && request.resource.data.title == "Request status updated")
+              || (request.auth.uid == updatedBooking.customerId
+                && get(bookingPath).data.status in ["pending", "accepted"]
+                && updatedBooking.status == "cancelled"
+                && request.resource.data.isRead == false
+                && request.resource.data.readAt == null
+                && request.resource.data.title == "Customer cancelled request"))));
+    }
+
+    function validMechanicNotificationUpdate(uid, notificationId) {
+      let bookingPath = /databases/$(database)/documents/bookings/$(request.resource.data.bookingId);
+      let previousBooking = get(bookingPath).data;
+      let updatedBooking = getAfter(bookingPath).data;
+      return signedIn()
+        && resource.data.bookingId == request.resource.data.bookingId
+        && request.resource.data.bookingId is string
+        && notificationId == request.resource.data.bookingId
+        && resource.data.providerId == uid
+        && request.resource.data.providerId == uid
+        && request.resource.data.customerId == resource.data.customerId
+        && request.resource.data.customerName == resource.data.customerName
+        && request.resource.data.vehicle == resource.data.vehicle
+        && request.resource.data.customerId == updatedBooking.customerId
+        && request.resource.data.customerName == updatedBooking.customerName
+        && request.resource.data.vehicle == updatedBooking.vehicle
+        && request.resource.data.status == updatedBooking.status
+        && updatedBooking.providerId == uid
+        && updatedBooking.bookingType == "onsite-mechanic"
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 300
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "title", "message", "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && previousBooking.customerId == resource.data.customerId
+        && previousBooking.providerId == uid
+        && previousBooking.status != updatedBooking.status
+        && updatedBooking.customerId == resource.data.customerId
+        && updatedBooking.status == request.resource.data.status
+        && ((request.auth.uid == uid
+            && request.resource.data.isRead == true
+            && request.resource.data.readAt == request.time
+            && request.resource.data.title == "Request status updated")
+          || (request.auth.uid == resource.data.customerId
+            && previousBooking.status in ["pending", "accepted"]
+            && updatedBooking.status == "cancelled"
+            && request.resource.data.isRead == false
+            && request.resource.data.readAt == null
+            && request.resource.data.title == "Customer cancelled request"));
+    }
+
+    function validTowingNotificationCreate(uid, notificationId) {
+      let bookingPath = /databases/$(database)/documents/bookings/$(request.resource.data.bookingId);
+      let updatedBooking = getAfter(bookingPath).data;
+      return signedIn()
+        && request.resource.data.keys().hasOnly([
+          "bookingId", "providerId", "customerId", "customerName", "vehicle",
+          "pickupLocation", "destination", "status", "title", "message",
+          "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && request.resource.data.bookingId is string
+        && notificationId == request.resource.data.bookingId
+        && request.resource.data.providerId == uid
+        && request.resource.data.customerId == updatedBooking.customerId
+        && request.resource.data.customerName == updatedBooking.customerName
+        && request.resource.data.vehicle == updatedBooking.vehicle
+        && request.resource.data.pickupLocation == updatedBooking.pickupLocation
+        && request.resource.data.destination == updatedBooking.destination
+        && request.resource.data.status == updatedBooking.status
+        && updatedBooking.providerId == uid
+        && updatedBooking.bookingType == "towing-company"
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 300
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && existsAfter(bookingPath)
+        && ((request.auth.uid == updatedBooking.customerId
+            && !exists(bookingPath)
+            && updatedBooking.status == "pending"
+            && request.resource.data.status == "pending"
+            && request.resource.data.title == "New towing request"
+            && request.resource.data.isRead == false
+            && request.resource.data.readAt == null)
+          || (request.auth.uid == updatedBooking.customerId
+            && exists(bookingPath)
+            && get(bookingPath).data.customerId == request.auth.uid
+            && get(bookingPath).data.status in ["pending", "accepted"]
+            && updatedBooking.status == "cancelled"
+            && request.resource.data.status == "cancelled"
+            && request.resource.data.title == "Customer cancelled request"
+            && request.resource.data.isRead == false
+            && request.resource.data.readAt == null));
+    }
+
+    function validTowingNotificationUpdate(uid, notificationId) {
+      let bookingPath = /databases/$(database)/documents/bookings/$(request.resource.data.bookingId);
+      let previousBooking = get(bookingPath).data;
+      let updatedBooking = getAfter(bookingPath).data;
+      return signedIn()
+        && resource.data.bookingId == request.resource.data.bookingId
+        && request.resource.data.bookingId is string
+        && notificationId == request.resource.data.bookingId
+        && resource.data.providerId == uid
+        && request.resource.data.providerId == uid
+        && request.resource.data.customerId == resource.data.customerId
+        && request.resource.data.customerName == resource.data.customerName
+        && request.resource.data.vehicle == resource.data.vehicle
+        && request.resource.data.pickupLocation == resource.data.pickupLocation
+        && request.resource.data.destination == resource.data.destination
+        && request.resource.data.status == updatedBooking.status
+        && updatedBooking.providerId == uid
+        && updatedBooking.bookingType == "towing-company"
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 300
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "bookingId", "providerId", "customerId", "customerName", "vehicle",
+          "pickupLocation", "destination", "status", "title", "message",
+          "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && previousBooking.customerId == resource.data.customerId
+        && previousBooking.providerId == uid
+        && previousBooking.status != updatedBooking.status
+        && updatedBooking.customerId == resource.data.customerId
+        && ((request.auth.uid == uid
+            && request.resource.data.isRead == true
+            && request.resource.data.readAt == request.time
+            && request.resource.data.title == "Request status updated")
+          || (request.auth.uid == resource.data.customerId
+            && previousBooking.status in ["pending", "accepted"]
+            && updatedBooking.status == "cancelled"
+            && request.resource.data.isRead == false
+            && request.resource.data.readAt == null
+            && request.resource.data.title == "Customer cancelled request"));
+    }
+
+    function validShopNotificationCreate(uid, notificationId) {
+      let bookingPath = /databases/$(database)/documents/bookings/$(request.resource.data.bookingId);
+      let booking = getAfter(bookingPath).data;
+      return signedIn()
+        && request.resource.data.keys().hasOnly([
+          "bookingId", "providerId", "customerId", "customerName", "vehicle", "problem",
+          "status", "title", "message", "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && request.resource.data.bookingId is string
+        && notificationId == request.resource.data.bookingId
+        && request.resource.data.providerId == uid
+        && request.resource.data.customerId == booking.customerId
+        && request.resource.data.customerName == booking.customerName
+        && request.resource.data.vehicle == booking.vehicle
+        && request.resource.data.problem == booking.problem
+        && request.resource.data.status == booking.status
+        && booking.providerId == uid
+        && booking.bookingType == "shop-owner"
+        && request.resource.data.title == "New auto shop request"
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 300
+        && request.resource.data.isRead == false
+        && request.resource.data.readAt == null
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && existsAfter(bookingPath)
+        && !exists(bookingPath)
+        && request.auth.uid == booking.customerId
+        && booking.status == "pending";
+    }
+
+    function validShopNotificationUpdate(uid, notificationId) {
+      let bookingPath = /databases/$(database)/documents/bookings/$(request.resource.data.bookingId);
+      let before = get(bookingPath).data;
+      let after = getAfter(bookingPath).data;
+      return signedIn()
+        && resource.data.bookingId == request.resource.data.bookingId
+        && notificationId == request.resource.data.bookingId
+        && resource.data.providerId == uid
+        && request.resource.data.providerId == uid
+        && request.resource.data.customerId == resource.data.customerId
+        && request.resource.data.customerName == resource.data.customerName
+        && request.resource.data.vehicle == resource.data.vehicle
+        && request.resource.data.problem == resource.data.problem
+        && request.resource.data.status == after.status
+        && after.providerId == uid
+        && after.bookingType == "shop-owner"
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 300
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "title", "message", "isRead", "readAt", "createdAt", "updatedAt"
+        ])
+        && before.customerId == resource.data.customerId
+        && before.providerId == uid
+        && before.status != after.status
+        && after.customerId == resource.data.customerId
+        && request.auth.uid == uid
+        && request.resource.data.isRead == true
+        && request.resource.data.readAt == request.time
+        && request.resource.data.title == "Request status updated";
     }
 
     function validMechanicBooking() {
       return request.resource.data.keys().hasOnly([
-          "bookingType", "customerId", "customerName", "customerEmail",
-          "providerId", "providerName", "vehicleId", "vehicle", "vehicleYear",
+          "bookingType", "customerId", "customerName", "customerEmail", "customerPhone", "customerAddress",
+          "providerId", "providerName", "providerPhone", "vehicleId", "vehicle", "vehicleYear",
           "vehiclePlate", "latitude", "longitude", "problem", "notes", "startingPrice", "status",
           "createdAt", "updatedAt"
         ])
         && request.resource.data.bookingType == "onsite-mechanic"
+        && request.resource.data.providerPhone is string
+        && request.resource.data.providerPhone.size() <= 30
+        && request.resource.data.providerPhone == get(/databases/$(database)/documents/providerListings/$(request.resource.data.providerId)).data.get("contactPhone", "")
         && request.resource.data.problem is string
         && request.resource.data.problem.size() > 0
         && request.resource.data.problem.size() <= 300;
@@ -262,14 +817,155 @@ service cloud.firestore {
       return isShopOwner(uid) && shop.uid == uid && shop.role == "shop-owner" && shop.verified == true;
     }
 
+    // The administrator's approval remains on the private verification
+    // document. This narrowly permits its owner to copy the exact approved
+    // business fields to the pre-existing providers/{uid} dashboard profile.
+    function approvedShopVerification(uid) {
+      let verificationPath = /databases/$(database)/documents/users/$(uid)/shopVerification/profile;
+      return exists(verificationPath)
+        && get(verificationPath).data.uid == uid
+        && get(verificationPath).data.role == "shop-owner"
+        && get(verificationPath).data.verificationStatus == "VERIFIED";
+    }
+
+    function validApprovedShopProfileSync(uid) {
+      let verification = get(/databases/$(database)/documents/users/$(uid)/shopVerification/profile).data;
+      return approvedShopVerification(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "businessName", "phone", "address", "latitude", "longitude", "verified"
+        ])
+        && request.resource.data.verified == true
+        && request.resource.data.businessName == verification.business.name
+        && request.resource.data.phone == verification.business.phone
+        && request.resource.data.address == verification.business.address
+        && request.resource.data.latitude == verification.business.latitude
+        && request.resource.data.longitude == verification.business.longitude;
+    }
+
     function validShopListingProfile(uid) {
       let shop = getAfter(/databases/$(database)/documents/providers/$(uid)).data;
-      return request.resource.data.businessName == shop.businessName
-        && request.resource.data.location.latitude == shop.latitude
+      return request.resource.data.location.latitude == shop.latitude
         && request.resource.data.location.longitude == shop.longitude
         && request.resource.data.emergencyServiceAvailable == true
         && ((shop.status == "open" && request.resource.data.availability == "available")
           || (shop.status == "closed" && request.resource.data.availability == "offline"));
+    }
+
+    // Availability toggles only change one public field. Keep this narrowly
+    // authorized so older approved listings do not need to pass the full
+    // listing creation schema just to sync open/closed state.
+    function validShopAvailabilitySync(uid) {
+      return signedIn()
+        && request.auth.uid == uid
+        && verifiedShop(uid)
+        && resource.data.providerId == uid
+        && resource.data.role == "shop-owner"
+        && resource.data.category == "Auto Shops"
+        && resource.data.visibility == "active"
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["availability"])
+        && request.resource.data.availability in ["available", "offline"]
+        && validShopListingProfile(uid);
+    }
+
+    function validMechanicAvailabilitySync(uid) {
+      return signedIn()
+        && request.auth.uid == uid
+        && verifiedMechanic(uid)
+        && resource.data.providerId == uid
+        && resource.data.role == "onsite-mechanic"
+        && resource.data.category == "Onsite Mechanics"
+        && resource.data.visibility == "active"
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["availability"])
+        && request.resource.data.availability in ["available", "offline"];
+    }
+
+    function validMechanicProfileEdit(uid) {
+      let profilePath = /databases/$(database)/documents/users/$(uid)/providerProfile/profile;
+      let oldProfile = get(profilePath).data;
+      return signedIn()
+        && request.auth.uid == uid
+        && oldProfile.uid == uid
+        && oldProfile.role == "onsite-mechanic"
+        && oldProfile.verificationStatus in ["INCOMPLETE", "PENDING", "VERIFIED", "REJECTED"]
+        && request.resource.data.uid == oldProfile.uid
+        && request.resource.data.role == oldProfile.role
+        && request.resource.data.verificationStatus == oldProfile.verificationStatus
+        && request.resource.data.identification == oldProfile.identification
+        && request.resource.data.diff(oldProfile).affectedKeys().hasOnly([
+          "personal", "professional", "credentials", "serviceInfo", "publicListing", "updatedAt"
+        ])
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validTowingCompanyProfileEdit(uid) {
+      let profilePath = /databases/$(database)/documents/users/$(uid)/towingCompanyProfile/profile;
+      let oldProfile = get(profilePath).data;
+      return signedIn()
+        && request.auth.uid == uid
+        && oldProfile.uid == uid
+        && oldProfile.role == "towing-company"
+        && oldProfile.verificationStatus in ["INCOMPLETE", "PENDING", "VERIFIED", "REJECTED"]
+        && request.resource.data.uid == oldProfile.uid
+        && request.resource.data.role == oldProfile.role
+        && request.resource.data.verificationStatus == oldProfile.verificationStatus
+        && request.resource.data.businessDocuments == oldProfile.businessDocuments
+        && request.resource.data.representative.governmentIdType == oldProfile.representative.governmentIdType
+        && request.resource.data.representative.governmentIdNumber == oldProfile.representative.governmentIdNumber
+        && request.resource.data.representative.validIdUrl == oldProfile.representative.validIdUrl
+        && request.resource.data.representative.profilePhotoUrl == oldProfile.representative.profilePhotoUrl
+        && request.resource.data.diff(oldProfile).affectedKeys().hasOnly([
+          "company", "services", "representative", "updatedAt"
+        ])
+        && request.resource.data.company.keys().hasOnly([
+          "companyName", "phone", "address", "cityMunicipality", "operatingHours"
+        ])
+        && request.resource.data.company.companyName is string
+        && request.resource.data.company.companyName.size() > 0
+        && request.resource.data.company.companyName.size() <= 120
+        && request.resource.data.company.phone is string
+        && request.resource.data.company.phone.size() > 0
+        && request.resource.data.company.phone.size() <= 30
+        && request.resource.data.company.address is string
+        && request.resource.data.company.address.size() > 0
+        && request.resource.data.company.address.size() <= 300
+        && request.resource.data.company.cityMunicipality is string
+        && request.resource.data.company.cityMunicipality.size() > 0
+        && request.resource.data.company.cityMunicipality.size() <= 120
+        && request.resource.data.company.operatingHours is string
+        && request.resource.data.company.operatingHours.size() > 0
+        && request.resource.data.company.operatingHours.size() <= 200
+        && request.resource.data.services.keys().hasOnly([
+          "towingServices", "vehicleTypesSupported", "serviceArea", "emergencyServiceAvailable"
+        ])
+        && request.resource.data.services.towingServices is list
+        && request.resource.data.services.towingServices.size() >= 1
+        && request.resource.data.services.towingServices.size() <= 5
+        && request.resource.data.services.towingServices.hasOnly([
+          "Flatbed Towing", "Wheel-Lift Towing", "Emergency Roadside Assistance",
+          "Accident Recovery", "Motorcycle Towing"
+        ])
+        && request.resource.data.services.vehicleTypesSupported is list
+        && request.resource.data.services.vehicleTypesSupported.size() >= 1
+        && request.resource.data.services.vehicleTypesSupported.size() <= 6
+        && request.resource.data.services.vehicleTypesSupported.hasOnly([
+          "Motorcycle", "Car", "SUV", "Pickup Truck", "Van", "Truck"
+        ])
+        && request.resource.data.services.serviceArea is string
+        && request.resource.data.services.serviceArea.size() > 0
+        && request.resource.data.services.serviceArea.size() <= 120
+        && request.resource.data.services.emergencyServiceAvailable is bool
+        && request.resource.data.representative.keys().hasOnly([
+          "fullName", "governmentIdType", "governmentIdNumber", "validIdUrl", "profilePhotoUrl"
+        ])
+        && request.resource.data.representative.fullName is string
+        && request.resource.data.representative.fullName.size() > 0
+        && request.resource.data.representative.fullName.size() <= 120
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validHomeGarageListingProfile(uid) {
+      let verification = get(/databases/$(database)/documents/users/$(uid)/homeGarageVerification/profile).data;
+      return request.resource.data.businessName == verification.business.name;
     }
 
     function validShopVehicle() {
@@ -322,16 +1018,49 @@ service cloud.firestore {
         && validShopVehicle();
     }
 
+    // One lock per customer/shop pair serializes simultaneous request creates.
+    // The lock must point to the pending booking created in the same commit.
+    function validShopBookingLock(bookingId) {
+      let lockPath = /databases/$(database)/documents/users/$(request.resource.data.customerId)/shopBookingLocks/$(request.resource.data.providerId);
+      return existsAfter(lockPath)
+        && getAfter(lockPath).data.customerId == request.resource.data.customerId
+        && getAfter(lockPath).data.providerId == request.resource.data.providerId
+        && getAfter(lockPath).data.bookingId == bookingId;
+    }
+
+    function validShopBookingLockWrite(uid, providerId) {
+      let bookingPath = /databases/$(database)/documents/bookings/$(request.resource.data.bookingId);
+      return signedIn()
+        && request.resource.data.keys().hasOnly(["customerId", "providerId", "bookingId"])
+        && isDocumentOwner(uid)
+        && request.resource.data.customerId == uid
+        && request.resource.data.providerId == providerId
+        && request.resource.data.bookingId is string
+        && existsAfter(bookingPath)
+        && getAfter(bookingPath).data.bookingType == "shop-owner"
+        && getAfter(bookingPath).data.customerId == request.auth.uid
+        && getAfter(bookingPath).data.providerId == request.resource.data.providerId
+        && getAfter(bookingPath).data.status == "pending";
+    }
+
     function validShopBookingTransition() {
       let before = resource.data.status;
       let after = request.resource.data.status;
       return isShopOwner(request.auth.uid)
-        && ((before == "pending" && after == "accepted" && isOpenShop(request.auth.uid) && verifiedShop(request.auth.uid))
-          || (before == "pending" && after == "rejected")
-          || (before == "accepted" && after == "vehicle_arrived")
-          || (before == "vehicle_arrived" && after == "diagnosing")
-          || (before == "diagnosing" && after == "repairing")
-          || (before == "repairing" && after == "completed"));
+        && ((before == "pending" && after == "accepted" && isOpenShop(request.auth.uid) && verifiedShop(request.auth.uid)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"]))
+          || (before == "pending" && after == "rejected"
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"]))
+          || (before == "accepted" && after == "vehicle_arrived"
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"]))
+          || (before == "vehicle_arrived" && after == "diagnosing"
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"]))
+          || (before == "diagnosing" && after == "repairing"
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"]))
+          || (before == "repairing" && after == "completed"
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt", "completionNote"])
+              && (!request.resource.data.keys().hasAny(["completionNote"])
+                || (request.resource.data.completionNote is string && request.resource.data.completionNote.size() <= 160))));
     }
 
     function validTowingBooking() {
@@ -343,7 +1072,7 @@ service cloud.firestore {
           "vehiclePlate", "latitude", "longitude", "providerLatitude", "providerLongitude",
           "destinationLatitude", "destinationLongitude", "providerToPickupDistanceKm",
           "pickupToDestinationDistanceKm", "totalDistanceKm", "basePrice",
-          "pricePerKm", "distanceCharge", "estimatedTotalPrice",
+          "pricePerKm", "distanceCharge", "estimatedTotalPrice", "pricingMode", "dispatcherPhone",
           "pickupLocation", "destination", "towingType",
           "vehicleCondition", "notes", "startingPrice", "status", "createdAt",
           "updatedAt"
@@ -367,16 +1096,31 @@ service cloud.firestore {
         && request.resource.data.totalDistanceKm <= 2000
         && request.resource.data.totalDistanceKm >= request.resource.data.providerToPickupDistanceKm + request.resource.data.pickupToDestinationDistanceKm - 0.02
         && request.resource.data.totalDistanceKm <= request.resource.data.providerToPickupDistanceKm + request.resource.data.pickupToDestinationDistanceKm + 0.02
-        && request.resource.data.basePrice is number
-        && request.resource.data.basePrice == pricing.basePrice
-        && request.resource.data.pricePerKm is number
-        && request.resource.data.pricePerKm == pricing.pricePerKm
-        && request.resource.data.distanceCharge is number
-        && request.resource.data.distanceCharge >= request.resource.data.totalDistanceKm * request.resource.data.pricePerKm - 0.01
-        && request.resource.data.distanceCharge <= request.resource.data.totalDistanceKm * request.resource.data.pricePerKm + 0.01
-        && request.resource.data.estimatedTotalPrice is number
-        && request.resource.data.estimatedTotalPrice >= request.resource.data.basePrice + request.resource.data.distanceCharge - 0.01
-        && request.resource.data.estimatedTotalPrice <= request.resource.data.basePrice + request.resource.data.distanceCharge + 0.01
+        && request.resource.data.pricingMode in ["fixed", "dispatcher"]
+        && request.resource.data.dispatcherPhone is string
+        && (
+          ((pricing.pricingMode == null || pricing.pricingMode == "fixed")
+            && request.resource.data.pricingMode == "fixed"
+            && request.resource.data.dispatcherPhone == ""
+            && request.resource.data.basePrice is number
+            && request.resource.data.basePrice == pricing.basePrice
+            && request.resource.data.pricePerKm is number
+            && request.resource.data.pricePerKm == pricing.pricePerKm
+            && request.resource.data.distanceCharge is number
+            && request.resource.data.distanceCharge >= request.resource.data.totalDistanceKm * request.resource.data.pricePerKm - 0.01
+            && request.resource.data.distanceCharge <= request.resource.data.totalDistanceKm * request.resource.data.pricePerKm + 0.01
+            && request.resource.data.estimatedTotalPrice is number
+            && request.resource.data.estimatedTotalPrice >= request.resource.data.basePrice + request.resource.data.distanceCharge - 0.01
+            && request.resource.data.estimatedTotalPrice <= request.resource.data.basePrice + request.resource.data.distanceCharge + 0.01)
+          || (pricing.pricingMode == "dispatcher"
+            && request.resource.data.pricingMode == "dispatcher"
+            && request.resource.data.dispatcherPhone == pricing.dispatcherPhone
+            && request.resource.data.dispatcherPhone.size() > 0
+            && request.resource.data.basePrice == 0
+            && request.resource.data.pricePerKm == 0
+            && request.resource.data.distanceCharge == 0
+            && request.resource.data.estimatedTotalPrice == 0)
+        )
         && request.resource.data.pickupLocation is string
         && request.resource.data.pickupLocation.size() > 0
         && request.resource.data.pickupLocation.size() <= 300
@@ -389,14 +1133,18 @@ service cloud.firestore {
 
     function validTowingPricingShape() {
       return request.resource.data.keys().hasOnly([
-          "basePrice", "pricePerKm", "createdAt", "updatedAt"
+          "basePrice", "pricePerKm", "pricingMode", "dispatcherPhone", "createdAt", "updatedAt"
         ])
         && request.resource.data.basePrice is number
         && request.resource.data.basePrice >= 0
         && request.resource.data.basePrice <= 1000000
         && request.resource.data.pricePerKm is number
         && request.resource.data.pricePerKm >= 0
-        && request.resource.data.pricePerKm <= 100000;
+        && request.resource.data.pricePerKm <= 100000
+        && request.resource.data.pricingMode in ["fixed", "dispatcher"]
+        && request.resource.data.dispatcherPhone is string
+        && request.resource.data.dispatcherPhone.size() <= 50
+        && (request.resource.data.pricingMode == "fixed" || request.resource.data.dispatcherPhone.size() > 0);
     }
 
     function validVehicleShape(vehicleId) {
@@ -433,6 +1181,18 @@ service cloud.firestore {
         || (before == "in_progress" && after == "completed");
     }
 
+    function validMechanicLocationUpdate() {
+      return resource.data.bookingType == "onsite-mechanic"
+        && resource.data.status in ["accepted", "en_route", "arrived", "in_progress"]
+        && request.resource.data.mechanicLatitude is number
+        && request.resource.data.mechanicLatitude >= -90
+        && request.resource.data.mechanicLatitude <= 90
+        && request.resource.data.mechanicLongitude is number
+        && request.resource.data.mechanicLongitude >= -180
+        && request.resource.data.mechanicLongitude <= 180
+        && request.resource.data.mechanicLocationUpdatedAt == request.time;
+    }
+
     function validProviderReview(reviewId) {
       let bookingPath = /databases/$(database)/documents/bookings/$(reviewId);
       let booking = get(bookingPath).data;
@@ -449,7 +1209,32 @@ service cloud.firestore {
         && request.resource.data.providerId == booking.providerId
         && request.resource.data.providerId != request.auth.uid
         && request.resource.data.providerRole == booking.bookingType
-        && request.resource.data.providerRole in ["onsite-mechanic", "towing-company"]
+        && request.resource.data.providerRole in ["onsite-mechanic", "towing-company", "shop-owner"]
+        && request.resource.data.rating is int
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && request.resource.data.comment is string
+        && request.resource.data.comment.size() <= 1000
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validParkingProviderReview(reviewId) {
+      let bookingPath = /databases/$(database)/documents/parkingBookings/$(reviewId);
+      let booking = get(bookingPath).data;
+      return signedIn()
+        && exists(bookingPath)
+        && request.resource.data.keys().hasOnly([
+          "bookingId", "customerId", "providerId", "providerRole", "rating",
+          "comment", "createdAt", "updatedAt"
+        ])
+        && request.resource.data.bookingId == reviewId
+        && request.resource.data.customerId == request.auth.uid
+        && booking.customerId == request.auth.uid
+        && booking.status == "completed"
+        && request.resource.data.providerId == booking.providerId
+        && request.resource.data.providerId != request.auth.uid
+        && request.resource.data.providerRole == "homegarage"
         && request.resource.data.rating is int
         && request.resource.data.rating >= 1
         && request.resource.data.rating <= 5
@@ -462,11 +1247,18 @@ service cloud.firestore {
     // General account data remains private to its account owner.
     match /users/{uid} {
       allow create: if isDocumentOwner(uid)
-        && request.resource.data.uid == uid;
-      allow get: if isDocumentOwner(uid) || (isAdmin() && resource.data.role in ['onsite-mechanic', 'shop-owner', 'towing-company']);
+        && request.resource.data.uid == uid
+        && request.resource.data.role in ["owner", "onsite-mechanic", "shop-owner", "towing-company", "homegarage"];
+      allow get: if isDocumentOwner(uid)
+        || (isAdmin() && resource.data.role in ["onsite-mechanic", "shop-owner", "towing-company", "homegarage", "owner"]);
+      allow list: if isAdmin();
+      allow update: if validAdminAccountStatus(uid);
       allow update: if isDocumentOwner(uid)
         && request.resource.data.uid == resource.data.uid
-        && request.resource.data.role == resource.data.role;
+        && request.resource.data.role == resource.data.role
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          "accountStatus", "accountStatusUpdatedAt", "accountStatusUpdatedBy", "accountStatusNotificationId"
+        ]);
       allow delete: if false;
 
       match /vehicles/{vehicleId} {
@@ -486,30 +1278,165 @@ service cloud.firestore {
         allow delete: if isDocumentOwner(uid);
       }
 
+      match /notifications/{notificationId} {
+        allow get, list: if isDocumentOwner(uid);
+        allow create: if validCustomerNotificationCreate(uid, notificationId);
+        allow update: if (isDocumentOwner(uid)
+            && resource.data.customerId == uid
+            && resource.data.isRead == false
+            && request.resource.data.isRead == true
+            && request.resource.data.readAt == request.time
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["isRead", "readAt"]))
+          || validCustomerNotificationUpdate(uid, notificationId);
+        allow delete: if false;
+      }
+
+      match /mechanicNotifications/{notificationId} {
+        allow get, list: if isDocumentOwner(uid);
+        allow create: if validMechanicNotificationCreate(uid, notificationId);
+        allow update: if (isDocumentOwner(uid)
+            && resource.data.providerId == uid
+            && resource.data.isRead == false
+            && request.resource.data.isRead == true
+            && request.resource.data.readAt == request.time
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["isRead", "readAt"]))
+          || validMechanicNotificationUpdate(uid, notificationId);
+        allow delete: if false;
+      }
+
+      match /towingNotifications/{notificationId} {
+        allow get, list: if isDocumentOwner(uid);
+        allow create: if validTowingNotificationCreate(uid, notificationId);
+        allow update: if (isDocumentOwner(uid)
+            && resource.data.providerId == uid
+            && resource.data.isRead == false
+            && request.resource.data.isRead == true
+            && request.resource.data.readAt == request.time
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["isRead", "readAt"]))
+          || validTowingNotificationUpdate(uid, notificationId);
+        allow delete: if false;
+      }
+
+      match /shopNotifications/{notificationId} {
+        allow get, list: if isDocumentOwner(uid);
+        allow create: if validShopNotificationCreate(uid, notificationId);
+        allow update: if (isDocumentOwner(uid)
+            && resource.data.providerId == uid
+            && resource.data.isRead == false
+            && request.resource.data.isRead == true
+            && request.resource.data.readAt == request.time
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["isRead", "readAt"]))
+          || validShopNotificationUpdate(uid, notificationId);
+        allow delete: if false;
+      }
+
+      // Account status messages are created by admins in the same batch as a
+      // provider status transition.
+      match /accountStatusNotifications/{notificationId} {
+        allow get, list: if isDocumentOwner(uid);
+        allow create: if request.resource.data.keys().hasOnly([
+            "notificationId", "providerId", "providerRole", "status", "previousStatus", "title", "message", "reason",
+            "isRead", "readAt", "createdAt", "updatedAt"
+          ])
+          && (validAdminVerificationNotification(uid, notificationId)
+            || validAdminAccountStatusNotification(uid, notificationId));
+        allow update: if isDocumentOwner(uid)
+          && resource.data.providerId == uid
+          && resource.data.isRead == false
+          && request.resource.data.isRead == true
+          && request.resource.data.readAt == request.time
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["isRead", "readAt"]);
+        allow delete: if false;
+      }
+
+      // Per-shop idempotency pointer, private to the vehicle owner.
+      match /shopBookingLocks/{providerId} {
+        allow get: if isDocumentOwner(uid);
+        allow list: if false;
+        allow create, update: if validShopBookingLockWrite(uid, providerId);
+        allow delete: if false;
+      }
+
       // Providers may submit and resubmit private verification information,
       // but cannot mark themselves as verified from the client application.
       match /ownerProfile/profile {
-        allow get: if isDocumentOwner(uid);
+        allow get: if isDocumentOwner(uid) || isAdmin();
+        allow update: if validAdminReview(uid, "owner", false);
         allow create, update: if isDocumentOwner(uid)
           && request.resource.data.uid == uid
           && request.resource.data.role == "owner"
           && isPendingVerificationSubmission();
+        allow update: if isDocumentOwner(uid)
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.verificationStatus == resource.data.verificationStatus
+          && request.resource.data.identification == resource.data.identification
+          && request.resource.data.vehicleDocuments == resource.data.vehicleDocuments
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["personal", "updatedAt"])
+          && request.resource.data.personal.keys().hasOnly(["fullName", "phone", "address", "cityMunicipality"])
+          && request.resource.data.personal.fullName is string
+          && request.resource.data.personal.phone is string
+          && request.resource.data.personal.address is string
+          && request.resource.data.personal.cityMunicipality is string;
         allow delete: if false;
       }
 
       match /providerProfile/profile {
         allow get: if isDocumentOwner(uid) || isAdmin();
-        allow update: if validAdminReview(uid, 'onsite-mechanic', false);
-        allow create, update: if isDocumentOwner(uid)
-          && isPendingVerificationSubmission();
+        allow list: if isAdmin() && resource.data.verificationStatus == "PENDING";
+        allow create: if isDocumentOwner(uid) && isPendingVerificationSubmission();
+        allow update: if validAdminReview(uid, "onsite-mechanic", false)
+          || (isDocumentOwner(uid) && isPendingVerificationSubmission())
+          || validMechanicProfileEdit(uid);
         allow delete: if false;
       }
 
       match /towingCompanyProfile/profile {
         allow get: if isDocumentOwner(uid) || isAdmin();
-        allow update: if validAdminReview(uid, 'towing-company', false);
-        allow create, update: if isDocumentOwner(uid)
+        allow list: if isAdmin() && resource.data.verificationStatus == "PENDING";
+        allow create: if isDocumentOwner(uid)
+          && request.resource.data.uid == uid
+          && request.resource.data.role == "towing-company"
           && isPendingVerificationSubmission();
+        allow update: if (isDocumentOwner(uid)
+            && resource.data.uid == uid
+            && resource.data.role == "towing-company"
+            && resource.data.verificationStatus in ["INCOMPLETE", "PENDING", "REJECTED"]
+            && isPendingVerificationSubmission())
+          || validAdminReview(uid, "towing-company", false)
+          || validTowingCompanyProfileEdit(uid);
+        allow delete: if false;
+      }
+
+      // Auto shops submit private verification documents here. Client writes
+      // are limited to a pending submission; approval remains administrator-controlled.
+      match /shopVerification/profile {
+        allow get: if isDocumentOwner(uid) || isAdmin();
+        allow update: if validAdminReview(uid, "shop-owner", false);
+        allow create: if isDocumentOwner(uid)
+          && request.resource.data.uid == uid
+          && request.resource.data.role == "shop-owner"
+          && request.resource.data.verificationStatus == "PENDING";
+        allow update: if isDocumentOwner(uid)
+            && request.resource.data.uid == uid
+            && request.resource.data.role == "shop-owner"
+            && request.resource.data.verificationStatus == "PENDING";
+        allow delete: if false;
+      }
+
+      // HomeGarage parking providers submit private business documents here.
+      // Approval is performed by administration, never by the client.
+      match /homeGarageVerification/profile {
+        allow get: if isDocumentOwner(uid) || isAdmin();
+        allow create: if isDocumentOwner(uid)
+          && request.resource.data.uid == uid
+          && request.resource.data.role == "homegarage"
+          && request.resource.data.verificationStatus == "PENDING";
+        allow update: if validAdminReview(uid, "homegarage", false)
+          || (isDocumentOwner(uid)
+            && request.resource.data.uid == uid
+            && request.resource.data.role == "homegarage"
+            && request.resource.data.verificationStatus == "PENDING");
         allow delete: if false;
       }
 
@@ -533,7 +1460,7 @@ service cloud.firestore {
           && request.resource.data.createdAt == resource.data.createdAt
           && request.resource.data.updatedAt == request.time
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            "basePrice", "pricePerKm", "updatedAt"
+            "basePrice", "pricePerKm", "pricingMode", "dispatcherPhone", "updatedAt"
           ]);
         allow delete: if false;
       }
@@ -542,8 +1469,8 @@ service cloud.firestore {
     // Business profiles stay private. Only trusted administration can approve a
     // shop; clients cannot set approval, replace an approved doc or delete it.
     match /providers/{uid} {
-      allow read: if isDocumentOwner(uid);
-      allow read: if isAdmin() && resource.data.role == 'shop-owner';
+      allow read: if isDocumentOwner(uid) || (isAdmin() && resource.data.role == "shop-owner");
+      allow list: if isAdmin() && resource.data.role == "shop-owner";
       allow update: if validShopReview(uid);
       allow create: if isDocumentOwner(uid)
         && ((isShopOwner(uid)
@@ -559,6 +1486,8 @@ service cloud.firestore {
               "businessName", "phone", "address", "latitude", "longitude", "status"
             ])
             && request.resource.data.status in ["open", "closed"])
+          || (isShopOwner(uid) && resource.data.role == "shop-owner"
+            && validApprovedShopProfileSync(uid))
           || (!isShopOwner(uid) && resource.data.role != "shop-owner" && request.resource.data.role != "shop-owner"));
       allow delete: if isDocumentOwner(uid) && !isShopOwner(uid) && resource.data.role != "shop-owner";
     }
@@ -567,41 +1496,173 @@ service cloud.firestore {
     // provider's verification is later revoked, the trusted admin workflow
     // must remove or deactivate this existing listing.
     match /providerListings/{providerId} {
+      allow get: if isAdmin() || isDocumentOwner(providerId) || (signedIn() && resource.data.visibility == "active" && resource.data.availability == "available");
+      allow list: if isAdmin() || (signedIn() && resource.data.visibility == "active" && resource.data.availability == "available");
       allow get: if isAdmin();
       allow update: if validAdminListingHide(providerId);
-      allow get: if isDocumentOwner(providerId) || (signedIn() && resource.data.visibility == "active");
-      allow list: if signedIn() && resource.data.visibility == "active";
       allow create: if validPublicListingWrite(providerId);
-      allow update: if validPublicListingWrite(providerId)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          "businessName", "location", "availability", "serviceAreaLabel",
-          "services", "vehicleTypes", "operatingHours", "startingPrice",
-          "emergencyServiceAvailable", "visibility"
-        ]);
+      allow update: if (validPublicListingWrite(providerId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            "businessName", "location", "availability", "serviceAreaLabel", "description", "contactPhone",
+            "services", "vehicleTypes", "operatingHours", "startingPrice",
+            "emergencyServiceAvailable", "photoUrls", "hoursType", "is24Hours", "weeklyHours", "totalSlots", "availableSlots", "visibility"
+          ]))
+        || validShopAvailabilitySync(providerId)
+        || validMechanicAvailabilitySync(providerId);
+      allow delete: if false;
+    }
+
+    match /providerStatusHistory/{historyId} {
+      allow get, list: if isAdmin();
+      allow create: if validProviderStatusHistory();
+      allow update, delete: if false;
+    }
+
+    match /providerVerificationHistory/{historyId} {
+      allow get, list: if isAdmin();
+      allow create: if validProviderVerificationHistory();
+      allow update, delete: if false;
+    }
+
+    // Admin review queues use collection-group queries and return only pending submissions.
+    match /{path=**}/ownerProfile/{profileId} {
+      allow list: if isAdmin() && resource.data.verificationStatus == "PENDING";
+    }
+    match /{path=**}/providerProfile/{profileId} {
+      allow list: if isAdmin() && resource.data.verificationStatus == "PENDING";
+    }
+    match /{path=**}/towingCompanyProfile/{profileId} {
+      allow list: if isAdmin() && resource.data.verificationStatus == "PENDING";
+    }
+    match /{path=**}/shopVerification/{profileId} {
+      allow list: if isAdmin() && resource.data.verificationStatus == "PENDING";
+    }
+    match /{path=**}/homeGarageVerification/{profileId} {
+      allow list: if isAdmin() && resource.data.verificationStatus == "PENDING";
+    }
+
+    // Parking bookings are customer-controlled sessions. Capacity changes are
+    // only accepted alongside the app's Firestore transactions; providers
+    // never need to start or end a customer's parking session.
+    match /parkingBookings/{bookingId} {
+      allow create: if signedIn()
+        && verifiedVehicleOwner(request.auth.uid)
+        && request.resource.data.keys().hasOnly(["providerId", "providerName", "customerId", "customerName", "vehicleId", "vehicle", "vehiclePlate", "vehicleType", "slotId", "slotNumber", "notes", "status", "bookedAt", "updatedAt"])
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.providerId is string
+        && request.resource.data.providerId != request.auth.uid
+        && request.resource.data.providerName is string
+        && request.resource.data.customerName is string
+        && request.resource.data.vehicleId is string
+        && request.resource.data.vehicle is string
+        && request.resource.data.vehiclePlate is string
+        && request.resource.data.vehicleType is string
+        && request.resource.data.slotId is string
+        && request.resource.data.slotNumber is int && request.resource.data.slotNumber >= 1
+        && request.resource.data.notes is string && request.resource.data.notes.size() <= 500
+        && request.resource.data.status == "reserved"
+        && request.resource.data.bookedAt == request.time && request.resource.data.updatedAt == request.time
+        && get(/databases/$(database)/documents/providerListings/$(request.resource.data.providerId)).data.role == "homegarage"
+        && get(/databases/$(database)/documents/providerListings/$(request.resource.data.providerId)).data.visibility == "active"
+        && get(/databases/$(database)/documents/providerListings/$(request.resource.data.providerId)).data.availability == "available"
+        && getAfter(/databases/$(database)/documents/parkingSlots/$(request.resource.data.slotId)).data.status == "reserved"
+        && getAfter(/databases/$(database)/documents/parkingSlots/$(request.resource.data.slotId)).data.customerId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/parkingSlots/$(request.resource.data.slotId)).data.bookingId == bookingId;
+      allow get, list: if signedIn() && (resource.data.customerId == request.auth.uid || resource.data.providerId == request.auth.uid);
+      allow update: if signedIn() && resource.data.customerId == request.auth.uid
+        && ((resource.data.status == "reserved" && request.resource.data.status == "active"
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "parkingStartedAt", "updatedAt"])
+          && request.resource.data.parkingStartedAt == request.time && request.resource.data.updatedAt == request.time)
+          || (resource.data.status == "active" && request.resource.data.status == "completed"
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "parkingEndedAt", "updatedAt"])
+          && request.resource.data.parkingEndedAt == request.time && request.resource.data.updatedAt == request.time
+          && getAfter(/databases/$(database)/documents/parkingSlots/$(resource.data.slotId)).data.status == "available"));
+      allow delete: if false;
+    }
+
+    // A slot is the atomic capacity lock. Its state carries no public vehicle
+    // data, and only its reserving customer can release it.
+    match /parkingSlots/{slotId} {
+      allow get, list: if signedIn();
+      allow create: if isDocumentOwner(request.resource.data.providerId)
+        && request.resource.data.keys().hasOnly(["providerId", "slotNumber", "status", "customerId", "bookingId"])
+        && request.resource.data.slotNumber is int && request.resource.data.slotNumber >= 1 && request.resource.data.slotNumber <= 500
+        && request.resource.data.status == "available" && request.resource.data.customerId == null && request.resource.data.bookingId == null
+        && get(/databases/$(database)/documents/providerListings/$(request.resource.data.providerId)).data.role == "homegarage";
+      allow update: if signedIn()
+        && ((resource.data.status == "available" && request.resource.data.status == "reserved"
+          && request.resource.data.customerId == request.auth.uid && request.resource.data.bookingId is string
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "customerId", "bookingId", "updatedAt"])
+          && request.resource.data.updatedAt == request.time)
+          || (resource.data.status == "reserved" && resource.data.customerId == request.auth.uid
+          && request.resource.data.status == "available" && request.resource.data.customerId == null && request.resource.data.bookingId == null
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "customerId", "bookingId", "updatedAt"])
+          && request.resource.data.updatedAt == request.time));
       allow delete: if false;
     }
 
     match /bookings/{bookingId} {
+      allow get, list: if isAdmin();
       allow create: if validBookingBase()
-        && (validShopBooking()
+        && ((validShopBooking() && validShopBookingLock(bookingId))
           || (validBookingProvider() && (validMechanicBooking() || validTowingBooking())));
       allow get, list: if signedIn()
         && (resource.data.customerId == request.auth.uid
           || resource.data.providerId == request.auth.uid);
-      allow update: if signedIn()
-        && resource.data.providerId == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"])
-        && request.resource.data.updatedAt == request.time
-        && ((resource.data.bookingType == "shop-owner" && validShopBookingTransition())
-          || (resource.data.bookingType in ["onsite-mechanic", "towing-company"]
-            && validProviderBookingTransition()));
+      allow update: if signedIn() && (
+        (resource.data.providerId == request.auth.uid && (
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(["mechanicLatitude", "mechanicLongitude", "mechanicLocationUpdatedAt"])
+            && validMechanicLocationUpdate())
+          || (
+            ((resource.data.bookingType == "shop-owner"
+                && request.resource.data.updatedAt == request.time
+                && validShopBookingTransition())
+              || (resource.data.bookingType in ["onsite-mechanic", "towing-company"]
+                && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"])
+                && request.resource.data.updatedAt == request.time
+                && validProviderBookingTransition()))
+          )
+        ))
+        || (resource.data.customerId == request.auth.uid
+          && resource.data.bookingType in ["onsite-mechanic", "towing-company"]
+          && resource.data.status in ["pending", "accepted"]
+          && request.resource.data.status == "cancelled"
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"])
+          && request.resource.data.updatedAt == request.time)
+      );
       allow delete: if false;
     }
 
     match /providerReviews/{reviewId} {
       allow get, list: if signedIn();
-      allow create: if validProviderReview(reviewId);
+      allow create: if validProviderReview(reviewId) || validParkingProviderReview(reviewId);
       allow update, delete: if false;
+    }
+
+    // Staff requests record manual review only; they never grant an Auth admin claim.
+    match /adminStaffRequests/{requestId} {
+      allow get, list: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(["uid", "email", "displayName", "status", "requestedAt"])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() <= 120
+        && request.resource.data.status == "PENDING"
+        && request.resource.data.requestedAt == request.time;
+      allow update: if isAdmin()
+        && resource.data.status == "PENDING"
+        && resource.data.uid != request.auth.uid
+        && request.resource.data.keys().hasOnly(["uid", "email", "displayName", "status", "requestedAt", "reviewedBy", "reviewedAt"])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "reviewedBy", "reviewedAt"])
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.displayName == resource.data.displayName
+        && request.resource.data.requestedAt == resource.data.requestedAt
+        && request.resource.data.status in ["MANUAL_GRANT_RECORDED", "REJECTED"]
+        && request.resource.data.reviewedBy == request.auth.uid
+        && request.resource.data.reviewedAt == request.time;
+      allow delete: if false;
     }
 
     match /{document=**} {
