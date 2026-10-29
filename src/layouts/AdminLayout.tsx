@@ -31,6 +31,7 @@ function AdminLayoutContent() {
         : location.pathname === '/admin/home-garage' ? 'Home Garage'
           : location.pathname === '/admin/vehicle-owners' ? 'Vehicle Owners'
             : location.pathname === '/admin/bookings' ? 'Bookings'
+            : location.pathname === '/admin/action-review' ? 'Action Review'
             : location.pathname === '/admin/notifications' ? 'Notifications'
               : location.pathname === '/admin/reports' ? 'Reports'
                 : location.pathname === '/admin/complaints' ? 'Complaints' : 'Dashboard';

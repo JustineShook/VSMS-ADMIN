@@ -12,6 +12,7 @@ const navigation = [
   { label: 'Home Garage', icon: CarFront, target: '/admin/home-garage' },
   { label: 'Vehicle Owners', icon: Users, target: '/admin/vehicle-owners' },
   { label: 'Bookings', icon: CalendarDays, target: '/admin/bookings' },
+  { label: 'Action Review', icon: ShieldAlert, target: '/admin/action-review' },
   { label: 'Complaints', icon: ShieldAlert, target: '/admin/complaints' },
   { label: 'Reports', icon: Flag, target: '/admin/reports' },
   { label: 'Notifications', icon: Bell, target: '/admin/notifications' },

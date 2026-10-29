@@ -114,7 +114,9 @@ export async function reviewApplication(application: Application, decision: 'VER
     });
     // Do not auto-publish private submission data. A stale existing listing is
     // hidden atomically; approved providers publish via the existing mobile form.
-    if (current.role !== 'owner' && listing.exists()) transaction.update(listingRef, { visibility: 'inactive' });
+    if (current.role !== 'owner' && listing.exists()) {
+      transaction.update(listingRef, { visibility: 'inactive' });
+    }
   });
 }
 export async function loadApplicantName(uid: string): Promise<string> {

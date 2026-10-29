@@ -81,7 +81,9 @@ export function HomeGaragePage() {
     const nextStatus = provider.accountStatus === 'active' ? 'suspended' : 'active';
     const action = nextStatus === 'suspended' ? 'Suspend' : 'Restore';
     const reason = window.prompt(`Optional reason for ${action.toLowerCase()}ing ${provider.name}:`) ?? '';
-    if (!window.confirm(`${action} ${provider.name}'s account?${nextStatus === 'suspended' ? ' Their public parking lot listing will be hidden.' : ' Their listing will remain hidden until they republish.'}`)) return;
+    if (!window.confirm(`${action} ${provider.name}'s account?${nextStatus === 'suspended'
+      ? ' Their public parking lot listing will be hidden, and its current visibility will be recorded.'
+      : ' The listing will be restored only if it was public before this suspension and the provider still meets publishing requirements. A listing that was already hidden will stay hidden.'}`)) return;
     setStatusBusy(provider.id);
     setError('');
     try {
@@ -95,15 +97,16 @@ export function HomeGaragePage() {
         accountStatus: provider.accountStatus,
         listingVisibility: provider.visibility === 'active' ? 'active' : 'inactive',
       };
-      await updateProviderAccountStatus(listing, nextStatus, reason);
+      const result = await updateProviderAccountStatus(listing, nextStatus, reason);
       setProviders(current => current.map(row => row.id === provider.id ? {
         ...row,
         accountStatus: nextStatus,
-        visibility: nextStatus === 'suspended' ? 'inactive' : row.visibility,
+        visibility: result.listingVisibility === 'active' ? 'active' : 'inactive',
       } : row));
     } catch (reason) { setError(bookingError(reason)); }
     finally { setStatusBusy(''); }
   }
+
 
   return <div className="space-y-6">
     <div className="flex flex-wrap items-start justify-between gap-4">
@@ -144,7 +147,7 @@ export function HomeGaragePage() {
           </tr>)}</tbody>
         </table>
       </div>}
-      {!busy && providers.length > 0 && <p className="border-t border-slate-100 px-5 py-3 text-[10px] text-slate-400">Click a parking lot name to view details. Suspending hides the listing; restoring the account does not republish it.</p>}
+      {!busy && providers.length > 0 && <p className="border-t border-slate-100 px-5 py-3 text-[10px] text-slate-400">Click a parking lot name to view details. Restoring republishes a listing only when it was public before suspension and the provider still meets publishing requirements.</p>}
     </section>
     {selected && <ProviderVerificationProfile provider={{
       id: selected.id,

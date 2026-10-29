@@ -13,6 +13,7 @@ import { HomeGaragePage } from '../pages/HomeGaragePage';
 import { VerificationPage } from '../pages/VerificationPage';
 import { ReportsPage } from '../pages/ReportsPage';
 import { ComplaintsPage } from '../pages/ComplaintsPage';
+import { ActionReviewPage } from '../pages/ActionReviewPage';
 export function AppRoutes() {
   return <Routes>
     <Route element={<AuthLayout />}>
@@ -33,6 +34,7 @@ export function AppRoutes() {
         <Route path="admin/home-garage" element={<HomeGaragePage />} />
         <Route path="admin/vehicle-owners" element={<ProviderDirectoryPage role="owner" />} />
         <Route path="admin/bookings" element={<BookingsPage />} />
+        <Route path="admin/action-review" element={<ActionReviewPage />} />
         <Route path="admin/notifications" element={<NotificationsPage />} />
         <Route path="admin/reports" element={<ReportsPage />} />
         <Route path="admin/complaints" element={<ComplaintsPage />} />
