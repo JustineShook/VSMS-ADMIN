@@ -441,7 +441,7 @@ service cloud.firestore {
           "providerId", "role", "category", "businessName", "location",
           "availability", "visibility", "ratingSummary", "services",
           "vehicleTypes", "serviceAreaLabel", "description", "startingPrice", "operatingHours",
-          "emergencyServiceAvailable", "acceptsScheduledBookings", "photoUrls", "hoursType", "is24Hours", "weeklyHours", "totalSlots", "availableSlots"
+          "emergencyServiceAvailable", "acceptsScheduledBookings", "photoUrls", "hoursType", "is24Hours", "weeklyHours", "totalSlots", "availableSlots", "contactPhone"
         ])
         && request.resource.data.location.keys().hasOnly(["latitude", "longitude"])
         && request.resource.data.ratingSummary.keys().hasOnly(["average", "count"]);
@@ -468,8 +468,9 @@ service cloud.firestore {
         && request.resource.data.description.size() <= 600
         && (!request.resource.data.keys().hasAny(["contactPhone"])
           || (request.resource.data.contactPhone is string
-            && request.resource.data.contactPhone.size() >= 7
-            && request.resource.data.contactPhone.size() <= 30))
+            && (request.resource.data.contactPhone.size() == 0
+              || (request.resource.data.contactPhone.size() >= 7
+                && request.resource.data.contactPhone.size() <= 30))))
         && request.resource.data.operatingHours is string
         && request.resource.data.operatingHours.size() >= 2
         && request.resource.data.operatingHours.size() <= 200
@@ -594,6 +595,8 @@ service cloud.firestore {
     function validPublicListingCreate(uid) {
       return validPublicListingWrite(uid)
         && !request.resource.data.keys().hasAny(["publicListingId", "guestSyncRevision"])
+        && (!request.resource.data.keys().hasAny(["contactPhone"])
+          || request.resource.data.contactPhone == "")
         && (request.resource.data.role != "shop-owner"
           || (request.resource.data.keys().hasAll(["photoUrls", "hoursType", "is24Hours", "weeklyHours"])
             && request.resource.data.photoUrls is list
@@ -1269,7 +1272,7 @@ service cloud.firestore {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
       return signedIn()
         && request.auth.uid == uid
-        && (!changed.hasAny(["contactPhone"]) || !request.resource.data.keys().hasAny(["contactPhone"]))
+        && (!changed.hasAny(["contactPhone"]) || request.resource.data.get("contactPhone", "") == "")
         && (role == "shop-owner"
           ? (changed.hasOnly(["availability"])
             ? validShopAvailabilitySync(uid)
@@ -2059,7 +2062,7 @@ service cloud.firestore {
     // provider's verification is later revoked, the trusted admin workflow
     // must remove or deactivate this existing listing.
     function isGuestReadablePhoneFreeListing() {
-      return !resource.data.keys().hasAny(["contactPhone"])
+      return (!resource.data.keys().hasAny(["contactPhone"]) || resource.data.contactPhone == "")
         && resource.data.visibility == "active"
         && (resource.data.availability == "available" || resource.data.get("acceptsScheduledBookings", false) == true);
     }
@@ -2070,7 +2073,7 @@ service cloud.firestore {
       allow list: if isAdmin() || (signedIn() && resource.data.visibility == "active" && (resource.data.availability == "available" || resource.data.get("acceptsScheduledBookings", false) == true));
       allow create: if accountIsActive(providerId) && validPublicListingCreate(providerId);
       allow update: if isAdmin()
-        ? ((!request.resource.data.diff(resource.data).affectedKeys().hasAny(["contactPhone"]) || !request.resource.data.keys().hasAny(["contactPhone"]))
+        ? ((!request.resource.data.diff(resource.data).affectedKeys().hasAny(["contactPhone"]) || request.resource.data.get("contactPhone", "") == "")
           && (request.resource.data.visibility == "active"
             ? validAdminListingRestore(providerId)
             : validAdminListingHide(providerId)))
@@ -2086,8 +2089,8 @@ service cloud.firestore {
       allow list: if false;
       allow create, update: if isDocumentOwner(providerId)
         && accountIsActive(providerId)
-        && exists(/databases/$(database)/documents/providerListings/$(providerId))
-        && get(/databases/$(database)/documents/providerListings/$(providerId)).data.visibility == "active"
+        && existsAfter(/databases/$(database)/documents/providerListings/$(providerId))
+        && getAfter(/databases/$(database)/documents/providerListings/$(providerId)).data.visibility == "active"
         && request.resource.data.keys().hasOnly(["providerId", "phone"])
         && request.resource.data.providerId == providerId
         && request.resource.data.phone is string
