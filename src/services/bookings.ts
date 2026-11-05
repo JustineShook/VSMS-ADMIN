@@ -360,6 +360,54 @@ export async function loadProviderVerificationData(provider: ProviderListing): P
   return data;
 }
 
+export interface AdminDemoSubscription {
+  status: 'active' | 'expired' | 'none';
+  plan: 'monthly' | 'yearly' | null;
+  demoAmount: number | null;
+  startedAt: Date | null;
+  expiresAt: Date | null;
+  history: { id: string; plan: string; demoAmount: number; durationDays: number; type: string; createdAt: Date | null; expiresAt: Date | null; label: string }[];
+}
+
+export async function loadProviderDemoSubscription(provider: ProviderListing): Promise<AdminDemoSubscription> {
+  const admin = auth?.currentUser;
+  if (!admin || !hasAdminClaim((await admin.getIdTokenResult()).claims) || auth?.currentUser?.uid !== admin.uid) {
+    throw new Error('Administrator access could not be verified. Sign in again.');
+  }
+  if (provider.role === 'owner') throw new Error('Demo subscriptions apply to service providers only.');
+  const { collection, doc, getDocFromServer, getDocsFromServer, orderBy, query } = await import('firebase/firestore');
+  const db = await getDb();
+  const [account, transactions] = await Promise.all([
+    getDocFromServer(doc(db, 'users', provider.id)),
+    getDocsFromServer(query(collection(db, 'users', provider.id, 'demoSubscriptionTransactions'), orderBy('createdAt', 'desc'))),
+  ]);
+  const timestamp = (value: unknown): Date | null => value && typeof value === 'object' && 'toDate' in value && typeof value.toDate === 'function' ? (value.toDate() as Date) : null;
+  const raw = account.data()?.subscription;
+  const plan = raw?.plan === 'monthly' || raw?.plan === 'yearly' ? raw.plan : null;
+  const expiresAt = timestamp(raw?.expiresAt);
+  const startedAt = timestamp(raw?.startedAt);
+  return {
+    status: !raw || !expiresAt ? 'none' : expiresAt.getTime() > Date.now() ? 'active' : 'expired',
+    plan,
+    demoAmount: typeof raw?.demoAmount === 'number' ? raw.demoAmount : null,
+    startedAt,
+    expiresAt,
+    history: transactions.docs.map(item => {
+      const data = item.data();
+      return {
+        id: item.id,
+        plan: typeof data.plan === 'string' ? data.plan : 'Unknown',
+        demoAmount: typeof data.demoAmount === 'number' ? data.demoAmount : 0,
+        durationDays: typeof data.durationDays === 'number' ? data.durationDays : 0,
+        type: typeof data.type === 'string' ? data.type : 'activation',
+        createdAt: timestamp(data.createdAt),
+        expiresAt: timestamp(data.expiresAt),
+        label: typeof data.label === 'string' ? data.label : 'demo_only',
+      };
+    }),
+  };
+}
+
 export interface ProviderAccountStatusResult {
   listingVisibility: 'active' | 'inactive' | 'missing' | 'not_applicable';
   listingCanBePublished: boolean;

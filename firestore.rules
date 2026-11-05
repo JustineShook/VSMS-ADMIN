@@ -34,6 +34,77 @@ service cloud.firestore {
         || get(userPath).data.get("accountStatus", "active") == "active";
     }
 
+    function isProviderRole(role) {
+      return role in ["onsite-mechanic", "shop-owner", "towing-company", "homegarage"];
+    }
+
+    function validDemoSubscriptionActivation(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let changed = after.diff(before).affectedKeys();
+      let subscription = after.subscription;
+      let transactionId = subscription.lastTransactionId;
+      let transactionPath = /databases/$(database)/documents/users/$(uid)/demoSubscriptionTransactions/$(transactionId);
+      let previous = before.get("subscription", {});
+      let planDuration = subscription.plan == "monthly" ? duration.value(30, "d") : duration.value(365, "d");
+      let expectedAmount = subscription.plan == "monthly" ? 100 : 1000;
+      return isDocumentOwner(uid)
+        && isProviderRole(before.role)
+        && after.uid == before.uid && after.role == before.role
+        && changed.hasOnly(["subscription"])
+        && subscription.keys().hasOnly(["status", "plan", "demoAmount", "startedAt", "expiresAt", "lastTransactionId"])
+        && subscription.status == "active"
+        && subscription.plan in ["monthly", "yearly"]
+        && subscription.demoAmount == expectedAmount
+        && subscription.startedAt == request.time
+        && subscription.expiresAt is timestamp
+        && subscription.expiresAt >= request.time + planDuration - duration.value(2, "m")
+        && subscription.expiresAt <= request.time + planDuration + duration.value(2, "m")
+        && subscription.lastTransactionId is string
+        && subscription.lastTransactionId.size() > 0
+        && (!before.keys().hasAny(["subscription"])
+          || !previous.keys().hasAny(["expiresAt"])
+          || previous.expiresAt <= request.time)
+        && existsAfter(transactionPath)
+        && getAfter(transactionPath).data.providerId == uid
+        && getAfter(transactionPath).data.transactionId == transactionId
+        && getAfter(transactionPath).data.plan == subscription.plan
+        && getAfter(transactionPath).data.demoAmount == expectedAmount
+        && getAfter(transactionPath).data.durationDays == (subscription.plan == "monthly" ? 30 : 365)
+        && getAfter(transactionPath).data.startedAt == request.time
+        && getAfter(transactionPath).data.expiresAt == subscription.expiresAt
+        && getAfter(transactionPath).data.createdAt == request.time
+        && getAfter(transactionPath).data.type == (!before.keys().hasAny(["subscription"]) ? "activation" : "renewal")
+        && getAfter(transactionPath).data.label == "demo_only";
+    }
+
+    function validDemoSubscriptionHistoryCreate(uid, transactionId) {
+      let data = request.resource.data;
+      let userPath = /databases/$(database)/documents/users/$(uid);
+      let subscription = getAfter(userPath).data.subscription;
+      let planDuration = data.plan == "monthly" ? duration.value(30, "d") : duration.value(365, "d");
+      let expectedAmount = data.plan == "monthly" ? 100 : 1000;
+      return isDocumentOwner(uid)
+        && isProviderRole(get(userPath).data.role)
+        && data.keys().hasOnly(["providerId", "transactionId", "plan", "demoAmount", "durationDays", "type", "startedAt", "expiresAt", "createdAt", "label"])
+        && data.providerId == uid && data.transactionId == transactionId
+        && data.plan in ["monthly", "yearly"]
+        && data.demoAmount == expectedAmount
+        && data.durationDays == (data.plan == "monthly" ? 30 : 365)
+        && data.type in ["activation", "renewal"]
+        && data.startedAt == request.time
+        && data.expiresAt is timestamp
+        && data.expiresAt >= request.time + planDuration - duration.value(2, "m")
+        && data.expiresAt <= request.time + planDuration + duration.value(2, "m")
+        && data.createdAt == request.time && data.label == "demo_only"
+        && subscription.lastTransactionId == transactionId
+        && subscription.plan == data.plan
+        && subscription.demoAmount == expectedAmount
+        && subscription.startedAt == data.startedAt
+        && subscription.expiresAt == data.expiresAt
+        && subscription.status == "active";
+    }
+
     function isDocumentOwner(uid) {
       return signedIn() && request.auth.uid == uid;
     }
@@ -441,7 +512,7 @@ service cloud.firestore {
           "providerId", "role", "category", "businessName", "location",
           "availability", "visibility", "ratingSummary", "services",
           "vehicleTypes", "serviceAreaLabel", "description", "startingPrice", "operatingHours",
-          "emergencyServiceAvailable", "acceptsScheduledBookings", "photoUrls", "hoursType", "is24Hours", "weeklyHours", "totalSlots", "availableSlots", "contactPhone"
+          "emergencyServiceAvailable", "acceptsScheduledBookings", "photoUrls", "hoursType", "is24Hours", "weeklyHours", "totalSlots", "availableSlots", "contactPhone", "mapSubscriptionExpiresAt"
         ])
         && request.resource.data.location.keys().hasOnly(["latitude", "longitude"])
         && request.resource.data.ratingSummary.keys().hasOnly(["average", "count"]);
@@ -595,6 +666,9 @@ service cloud.firestore {
     function validPublicListingCreate(uid) {
       return validPublicListingWrite(uid)
         && !request.resource.data.keys().hasAny(["publicListingId", "guestSyncRevision"])
+        && (!request.resource.data.keys().hasAny(["mapSubscriptionExpiresAt"])
+          || (request.resource.data.mapSubscriptionExpiresAt is timestamp
+            && get(/databases/$(database)/documents/users/$(uid)).data.get("subscription", {}).get("expiresAt", null) == request.resource.data.mapSubscriptionExpiresAt))
         && (!request.resource.data.keys().hasAny(["contactPhone"])
           || request.resource.data.contactPhone == "")
         && (request.resource.data.role != "shop-owner"
@@ -1267,7 +1341,20 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["availability"])
         && request.resource.data.availability in ["available", "offline"];
     }
-    function validProviderListingUpdate(uid) {
+
+    function validMapSubscriptionProjectionUpdate(uid) {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      let accountPath = /databases/$(database)/documents/users/$(uid);
+      let subscription = get(accountPath).data.get("subscription", {});
+      return signedIn()
+        && request.auth.uid == uid
+        && changed.hasOnly(["mapSubscriptionExpiresAt"])
+        && request.resource.data.mapSubscriptionExpiresAt is timestamp
+        && subscription.get("status", "") == "active"
+        && subscription.get("expiresAt", null) == request.resource.data.mapSubscriptionExpiresAt;
+    }
+
+    function validProviderListingProfileUpdate(uid) {
       let role = resource.data.role;
       let changed = request.resource.data.diff(resource.data).affectedKeys();
       return signedIn()
@@ -1297,6 +1384,11 @@ service cloud.firestore {
                     && (!changed.hasAny(["visibility"]) || accountIsActive(uid))
                     && validPublicListingUpdate(uid))
                 : false);
+    }
+
+    function validProviderListingUpdate(uid) {
+      return signedIn()
+        && (validMapSubscriptionProjectionUpdate(uid) || validProviderListingProfileUpdate(uid));
     }
     function validMechanicProfileEdit(uid) {
       let profilePath = /databases/$(database)/documents/users/$(uid)/providerProfile/profile;
@@ -1709,7 +1801,10 @@ service cloud.firestore {
           && optionalBookingReasonIsValid(request.resource.data, "declineReason"))
         || (before == "pending" && after in ["accepted", "cancelled"]
           && (after != "accepted" || reservationClaimedFor(bookingId, resource.data)))
-        || (before == "accepted" && after in ["en_route", "cancelled"])
+        || (before == "accepted" && after == "en_route"
+          && (resource.data.get("timingMode", "now") != "scheduled"
+            || (resource.data.scheduledAt is timestamp && resource.data.scheduledAt <= request.time)))
+        || (before == "accepted" && after == "cancelled")
         || (before == "en_route" && after in ["arrived", "cancelled"])
         || (before == "arrived" && after == "in_progress")
         || (before == "in_progress" && after == "completed"
@@ -1797,8 +1892,9 @@ service cloud.firestore {
         && request.resource.data.uid == resource.data.uid
         && request.resource.data.role == resource.data.role
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          "accountStatus", "accountStatusUpdatedAt", "accountStatusUpdatedBy", "accountStatusNotificationId"
+          "accountStatus", "accountStatusUpdatedAt", "accountStatusUpdatedBy", "accountStatusNotificationId", "subscription"
         ]);
+      allow update: if validDemoSubscriptionActivation(uid);
       allow delete: if false;
 
       match /vehicles/{vehicleId} {
@@ -1816,6 +1912,13 @@ service cloud.firestore {
             "type", "make", "model", "year", "color", "plateNumber", "updatedAt"
           ]);
         allow delete: if isDocumentOwner(uid);
+      }
+
+      match /demoSubscriptionTransactions/{transactionId} {
+        allow get, list: if isDocumentOwner(uid)
+          || (isAdmin() && isProviderRole(get(/databases/$(database)/documents/users/$(uid)).data.role));
+        allow create: if validDemoSubscriptionHistoryCreate(uid, transactionId);
+        allow update, delete: if false;
       }
 
       match /notifications/{notificationId} {
@@ -2067,6 +2170,23 @@ service cloud.firestore {
         && (resource.data.availability == "available" || resource.data.get("acceptsScheduledBookings", false) == true);
     }
 
+    // This collection is an ID-only index. Entries are created once alongside
+    // a valid public listing and remain stable across availability and admin
+    // hide/restore operations. Listing reads still pass the rule below.
+    match /publicProviderDirectory/{providerId} {
+      allow get, list: if true;
+      allow create: if isDocumentOwner(providerId)
+        && request.resource.data.keys().size() == 0
+        && accountIsActive(providerId)
+        && existsAfter(/databases/$(database)/documents/providerListings/$(providerId))
+        && getAfter(/databases/$(database)/documents/providerListings/$(providerId)).data.providerId == providerId
+        && getAfter(/databases/$(database)/documents/providerListings/$(providerId)).data.visibility == "active"
+        && getAfter(/databases/$(database)/documents/providerListings/$(providerId)).data.get("contactPhone", "") == ""
+        && (getAfter(/databases/$(database)/documents/providerListings/$(providerId)).data.availability == "available"
+          || getAfter(/databases/$(database)/documents/providerListings/$(providerId)).data.get("acceptsScheduledBookings", false) == true);
+      allow update, delete: if false;
+    }
+
     match /providerListings/{providerId} {
       allow get: if isAdmin() || isDocumentOwner(providerId) || (signedIn() && resource.data.visibility == "active" && (resource.data.availability == "available" || resource.data.get("acceptsScheduledBookings", false) == true)) || isGuestReadablePhoneFreeListing();
       // Guest collection reads stay disabled until query filters can prove a listing is phone-free.
@@ -2083,9 +2203,10 @@ service cloud.firestore {
 
     // Published contact numbers are isolated from guest-readable listing data.
     match /providerContacts/{providerId} {
-      allow get: if signedIn() && accountIsActive(providerId)
-        && exists(/databases/$(database)/documents/providerListings/$(providerId))
-        && get(/databases/$(database)/documents/providerListings/$(providerId)).data.visibility == "active";
+      allow get: if (isDocumentOwner(providerId) && accountIsActive(providerId))
+        || (signedIn() && accountIsActive(providerId)
+          && exists(/databases/$(database)/documents/providerListings/$(providerId))
+          && get(/databases/$(database)/documents/providerListings/$(providerId)).data.visibility == "active");
       allow list: if false;
       allow create, update: if isDocumentOwner(providerId)
         && accountIsActive(providerId)
@@ -2200,6 +2321,14 @@ service cloud.firestore {
               && validProviderBookingTransition(bookingId);
       }
 
+      function completionNoteWriteIsValid() {
+        let noteChanged = request.resource.data.diff(resource.data).affectedKeys().hasAny(["completionNote"]);
+        return !noteChanged || (resource.data.status != "completed"
+          && request.resource.data.status == "completed"
+          && request.resource.data.completionNote is string
+          && request.resource.data.completionNote.size() <= 160);
+      }
+
       function providerUpdateAllowed() {
         return resource.data.providerId == request.auth.uid
           && accountIsActive(request.auth.uid)
@@ -2213,7 +2342,7 @@ service cloud.firestore {
                   && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt", "declineReason", "riskEventType", "riskEventAt"])
                   && optionalBookingReasonIsValid(request.resource.data, "declineReason"))
                 || (resource.data.bookingType in ["onsite-mechanic", "towing-company"]
-                  && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt", "finalPrice", "completedAt"]))
+                  && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt", "finalPrice", "completedAt", "completionNote"]))
                 || (resource.data.bookingType == "homegarage"
                   && resource.data.status == "pending"
                   && request.resource.data.status == "rejected"
@@ -2227,7 +2356,8 @@ service cloud.firestore {
                 || (resource.data.bookingType in ["shop-owner", "homegarage"]
                   && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt", "finalPrice", "completedAt", "completionNote"])))
               && request.resource.data.updatedAt == request.time
-              && providerTransitionAllowed()));
+              && providerTransitionAllowed()
+              && completionNoteWriteIsValid()));
       }
 
       function customerCancellationAllowed() {
@@ -2263,6 +2393,57 @@ service cloud.firestore {
       allow get, list: if signedIn();
       allow create: if validProviderReview(reviewId) || validParkingProviderReview(reviewId);
       allow update, delete: if false;
+    }
+
+    // Complaint reports are private to their reporter and admins. Each
+    // booking/party pair has one deterministic ID; report writes never touch bookings.
+    match /complaints/{reportId} {
+      function reportBooking() {
+        return get(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)).data;
+      }
+      function validComplaintCreate() {
+        let data = request.resource.data;
+        let booking = reportBooking();
+        let ownerReport = data.reporterType == "Vehicle Owner" && booking.customerId == request.auth.uid
+          && data.reportedUserId == booking.providerId;
+        let providerReport = data.reporterType == "Provider" && booking.providerId == request.auth.uid
+          && data.reportedUserId == booking.customerId;
+        let active = booking.status in ["accepted", "en_route", "arrived", "in_progress", "vehicle_arrived", "diagnosing", "repairing"];
+        let recentCompletion = booking.status == "completed" && booking.completedAt is timestamp
+          && booking.completedAt <= request.time
+          && booking.completedAt >= request.time - duration.value(7, "d");
+        return signedIn()
+          && data.keys().hasOnly(["bookingId", "bookingType", "bookingStatusAtSubmission", "bookingReference", "reporterId", "reporterName", "reporterType", "reportedUserId", "reportedUserName", "category", "explanation", "status", "createdAt", "updatedAt"])
+          && data.bookingId is string && data.bookingId.size() > 0
+          && reportId == data.bookingId + "_" + request.auth.uid
+          && booking.bookingType == data.bookingType
+          && booking.bookingType in ["onsite-mechanic", "towing-company", "shop-owner", "homegarage"]
+
+          && data.bookingReference == data.bookingId
+          && data.bookingStatusAtSubmission == booking.status
+          && (active || recentCompletion)
+          && (ownerReport || providerReport)
+          && data.reporterId == request.auth.uid
+          && data.reporterName is string && data.reporterName.size() > 0 && data.reporterName.size() <= 120
+          && data.reportedUserName is string && data.reportedUserName.size() > 0 && data.reportedUserName.size() <= 120
+          && data.category in ["Behavior or safety concern", "Service quality", "Price or payment dispute", "Property or vehicle damage", "No-show or delay", "Other"]
+          && data.explanation is string && data.explanation.matches("(?s).*\\S.*") && data.explanation.size() >= 10 && data.explanation.size() <= 2000
+          && data.status == "Pending"
+          && data.createdAt == request.time && data.updatedAt == request.time;
+      }
+      allow get: if isAdmin() || (signedIn() && resource.data.reporterId == request.auth.uid);
+      allow list: if isAdmin();
+      allow create: if validComplaintCreate();
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "adminNote", "reviewedAt", "updatedAt"])
+        && request.resource.data.status in ["Pending", "Under Review", "Resolved", "Dismissed"]
+        && request.resource.data.adminNote is string
+        && ((request.resource.data.status in ["Resolved", "Dismissed"] && request.resource.data.adminNote.matches("(?s).*\\S.*"))
+          || (request.resource.data.status in ["Pending", "Under Review"] && request.resource.data.adminNote.size() <= 2000))
+        && request.resource.data.adminNote.size() <= 2000
+        && request.resource.data.reviewedAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
     }
 
     // Staff requests record manual review only; they never grant an Auth admin claim.

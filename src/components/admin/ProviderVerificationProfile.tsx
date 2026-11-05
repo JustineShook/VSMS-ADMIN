@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ExternalLink, X } from 'lucide-react';
-import { bookingError, loadProviderVerificationData } from '../../services/bookings';
+import { bookingError, loadProviderDemoSubscription, loadProviderVerificationData } from '../../services/bookings';
 import type { ProviderListing } from '../../services/bookings';
 import { display, documentUrl } from '../../lib/verification';
 
@@ -35,12 +35,16 @@ function ProfileFields({ data, prefix = '' }: { data: Record<string, unknown>; p
 export function ProviderVerificationProfile({ provider, onClose }: { provider: ProviderListing; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [data, setData] = useState<Record<string, unknown> | null>(null);
+  const [subscription, setSubscription] = useState<Awaited<ReturnType<typeof loadProviderDemoSubscription>> | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(true);
   useEffect(() => { dialog.current?.showModal(); }, []);
   useEffect(() => {
     let active = true;
-    void loadProviderVerificationData(provider).then(value => { if (active) setData(value); }, reason => { if (active) setError(bookingError(reason)); }).finally(() => { if (active) setBusy(false); });
+    void Promise.all([
+      loadProviderVerificationData(provider),
+      provider.role === 'owner' ? Promise.resolve(null) : loadProviderDemoSubscription(provider),
+    ]).then(([value, subscriptionValue]) => { if (active) { setData(value); setSubscription(subscriptionValue); } }, reason => { if (active) setError(bookingError(reason)); }).finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
   }, [provider]);
 
@@ -49,6 +53,22 @@ export function ProviderVerificationProfile({ provider, onClose }: { provider: P
     <div className="space-y-4 p-5"><p className="rounded border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">This view contains private information submitted for provider verification. Keep it within authorized administration.</p>
       {busy && <p role="status" className="text-sm text-slate-500">Loading submitted profile…</p>}
       {error && <p role="alert" className="notice">{error}</p>}
+      {subscription && <section className="rounded-md border border-slate-200 p-4">
+        <h3 className="font-semibold">Demo subscription</h3>
+        <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+          <div><dt className="text-xs text-slate-500">Status</dt><dd className="mt-1 capitalize">{subscription.status}</dd></div>
+          <div><dt className="text-xs text-slate-500">Plan</dt><dd className="mt-1">{subscription.plan ?? 'None'}</dd></div>
+          <div><dt className="text-xs text-slate-500">Demo amount</dt><dd className="mt-1">{subscription.demoAmount === null ? '—' : `₱${subscription.demoAmount.toLocaleString('en-PH')} · Demo only`}</dd></div>
+          <div><dt className="text-xs text-slate-500">Expiry</dt><dd className="mt-1">{subscription.expiresAt?.toLocaleString() ?? '—'}</dd></div>
+        </dl>
+        <h4 className="mt-5 text-sm font-semibold">Demo transaction history</h4>
+        {subscription.history.length ? <ul className="mt-2 divide-y divide-slate-100">{subscription.history.map(item => <li key={item.id} className="py-3 text-sm">
+          <p className="font-medium">{item.type === 'renewal' ? 'Manual demo renewal' : 'Demo activation'} · {item.plan}</p>
+          <p className="mt-1 text-xs text-slate-500">₱{item.demoAmount.toLocaleString('en-PH')} · {item.durationDays} days · {item.createdAt?.toLocaleString() ?? 'Date unavailable'}</p>
+          <p className="text-xs text-slate-500">Expires {item.expiresAt?.toLocaleString() ?? 'date unavailable'} · Demo only—no real money was charged.</p>
+        </li>)}</ul> : <p className="mt-2 text-sm text-slate-500">No demo transactions.</p>}
+        <p className="mt-3 text-xs text-slate-500">Read-only demo records. Subscription status does not restrict listings, discovery, bookings, or account access.</p>
+      </section>}
       {data && <ProfileFields data={data} />}
     </div>
   </dialog>;

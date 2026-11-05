@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
-import { collection, collectionGroup, doc, getDoc, getDocs, query, where, setDoc, updateDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
+import { collection, collectionGroup, doc, getDoc, getDocs, query, where, setDoc, updateDoc, writeBatch, serverTimestamp, runTransaction, deleteDoc, Timestamp } from 'firebase/firestore';
 
 let env;
 const roles = { m: 'onsite-mechanic', t: 'towing-company', s: 'shop-owner', o: 'owner' };
@@ -161,7 +161,10 @@ test('admin suspension updates the account, status history, notification, and pr
     await env.withSecurityRulesDisabled(async context => {
       const db = context.firestore();
       await setDoc(doc(db, 'users', uid), { uid, role, accountStatus: 'active' });
-      if (uid === 'm') await setDoc(doc(db, 'providerListings', uid), { providerId: uid, role, visibility: 'active', availability: 'available' });
+      if (uid === 'm') {
+        await setDoc(doc(db, 'providerListings', uid), { providerId: uid, role, visibility: 'active', availability: 'available' });
+        await setDoc(doc(db, 'bookings/suspended-active-job'), { providerId: uid, bookingType: role, customerId: 'o', status: 'in_progress' });
+      }
     });
     const db = admin();
     const batch = writeBatch(db);
@@ -185,7 +188,14 @@ test('admin suspension updates the account, status history, notification, and pr
     assert.equal((await getDoc(doc(recipientDb, 'users', uid))).data().accountStatus, 'suspended');
     assert.equal((await getDoc(doc(db, 'providerStatusHistory', notificationId))).exists(), true);
     assert.equal((await getDoc(doc(recipientDb, 'users', uid, 'accountStatusNotifications', notificationId))).data().reason, 'Review needed.');
-    if (uid === 'm') assert.equal((await getDoc(doc(db, 'providerListings', uid))).data().visibility, 'inactive');
+    if (uid === 'm') {
+      const suspendedProvider = env.authenticatedContext(uid).firestore();
+      assert.equal((await getDoc(doc(db, 'providerListings', uid))).data().visibility, 'inactive');
+      assert.equal((await getDoc(doc(db, 'providerListings', uid))).data().availability, 'available', 'admin hiding a suspended provider preserves availability');
+      await assertDeniedWithoutExpressionLimit(() => updateDoc(doc(suspendedProvider, 'bookings/suspended-active-job'), {
+        status: 'completed', finalPrice: 100, completedAt: serverTimestamp(), updatedAt: serverTimestamp(),
+      }), 'suspended provider cannot complete an active service');
+    }
     await assertFails(updateDoc(doc(env.authenticatedContext(uid).firestore(), 'users', uid), { accountStatus: 'active' }));
   }
 });
@@ -626,6 +636,80 @@ test('phone-free guest document reads pass, but map collection queries cannot pr
   await assertDeniedWithoutExpressionLimit(() => getDoc(doc(customer, 'users/contact-provider/providerProfile/profile')), 'customer cannot read full provider profile');
 });
 
+test('public provider directory exposes IDs only and every listing fetch still uses the phone-free get rule', async () => {
+  const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const providers = [
+    ['directory-mechanic', 'onsite-mechanic', 'Onsite Mechanics', 'Engine Diagnostics'],
+    ['directory-towing', 'towing-company', 'Towing', 'Flatbed Towing'],
+    ['directory-shop', 'shop-owner', 'Auto Shops', 'Engine repair'],
+    ['directory-garage', 'homegarage', 'Parking Lots', 'Oil change'],
+  ];
+  const listingFor = ([uid, role, category, service]) => ({
+    providerId: uid, role, category, businessName: 'Verified Directory Provider',
+    location: { latitude: 14.6, longitude: 121 }, availability: 'available', visibility: 'active',
+    ratingSummary: { average: 0, count: 0 }, services: [service], vehicleTypes: ['Car'],
+    serviceAreaLabel: 'Test service area', description: 'Test listing', startingPrice: null,
+    operatingHours: 'Open daily', emergencyServiceAvailable: true, acceptsScheduledBookings: true, contactPhone: '',
+    ...(role === 'shop-owner' ? { photoUrls: ['https://example.invalid/shop.jpg'], hoursType: '24_7', is24Hours: true, weeklyHours: days.map(day => ({ day })) } : {}),
+  });
+  for (const [uid, role, category, service] of providers) {
+    await env.withSecurityRulesDisabled(async context => {
+      const db = context.firestore();
+      await setDoc(doc(db, `users/${uid}`), { uid, role, accountStatus: 'active' });
+      if (role === 'onsite-mechanic') await setDoc(doc(db, `users/${uid}/providerProfile/profile`), { uid, role, verificationStatus: 'VERIFIED' });
+      if (role === 'towing-company') await setDoc(doc(db, `users/${uid}/towingCompanyProfile/profile`), { uid, role, verificationStatus: 'VERIFIED' });
+      if (role === 'homegarage') await setDoc(doc(db, `users/${uid}/homeGarageVerification/profile`), { uid, role, verificationStatus: 'VERIFIED', business: { name: 'Verified Directory Provider' } });
+      if (role === 'shop-owner') {
+        await setDoc(doc(db, `users/${uid}/shopVerification/profile`), { uid, role, verificationStatus: 'VERIFIED', business: { name: 'Verified Directory Provider', phone: '09123456789', address: 'Test area' } });
+        await setDoc(doc(db, `providers/${uid}`), { uid, role, verified: true, status: 'open' });
+      }
+    });
+    const db = env.authenticatedContext(uid).firestore();
+    const listingRef = doc(db, `providerListings/${uid}`);
+    const contactRef = doc(db, `providerContacts/${uid}`);
+    const directoryRef = doc(db, `publicProviderDirectory/${uid}`);
+    await assertSucceeds(runTransaction(db, async transaction => {
+      if (role === 'shop-owner') await transaction.get(doc(db, `providers/${uid}`));
+      const [listing, contact, directory] = await Promise.all([transaction.get(listingRef), transaction.get(contactRef), transaction.get(directoryRef)]);
+      assert.equal(listing.exists(), false);
+      assert.equal(contact.exists(), false);
+      assert.equal(directory.exists(), false);
+      transaction.set(listingRef, listingFor([uid, role, category, service]));
+      transaction.set(contactRef, { providerId: uid, phone: '09123456789' });
+      transaction.set(directoryRef, {});
+    }));
+  }
+
+  await env.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    for (const [uid, role, category, service] of [
+      ['directory-phone', 'onsite-mechanic', 'Onsite Mechanics', 'Engine Diagnostics'],
+      ['directory-hidden', 'onsite-mechanic', 'Onsite Mechanics', 'Engine Diagnostics'],
+    ]) {
+      await setDoc(doc(db, `providerListings/${uid}`), { ...listingFor([uid, role, category, service]), ...(uid === 'directory-phone' ? { contactPhone: '09123456789' } : { visibility: 'inactive' }) });
+      await setDoc(doc(db, `publicProviderDirectory/${uid}`), {});
+    }
+    await setDoc(doc(db, 'providerContacts/directory-mechanic'), { providerId: 'directory-mechanic', phone: '09123456789' });
+    await setDoc(doc(db, 'bookings/directory-private-booking'), { customerId: 'vehicle-owner', providerId: 'directory-mechanic', bookingType: 'onsite-mechanic', status: 'pending' });
+  });
+
+  const guest = env.unauthenticatedContext().firestore();
+  const entries = await assertSucceeds(getDocs(collection(guest, 'publicProviderDirectory')));
+  assert.ok(entries.docs.every(entry => Object.keys(entry.data()).length === 0));
+  for (const [uid] of providers) await assertSucceeds(getDoc(doc(guest, `providerListings/${uid}`)));
+  await assertDeniedWithoutExpressionLimit(() => getDoc(doc(guest, 'providerListings/directory-phone')), 'guest cannot read phone-bearing listing');
+  await assertDeniedWithoutExpressionLimit(() => getDoc(doc(guest, 'providerListings/directory-hidden')), 'guest cannot read hidden listing');
+  await assertDeniedWithoutExpressionLimit(() => getDoc(doc(guest, 'providerContacts/directory-mechanic')), 'guest cannot read provider contact');
+  await assertDeniedWithoutExpressionLimit(() => getDocs(collection(guest, 'providerContacts')), 'guest cannot list provider contacts');
+  await assertDeniedWithoutExpressionLimit(() => getDoc(doc(guest, 'bookings/directory-private-booking')), 'guest cannot read booking');
+  await assertDeniedWithoutExpressionLimit(() => getDocs(collection(guest, 'bookings')), 'guest cannot list bookings');
+  await assertDeniedWithoutExpressionLimit(() => getDocs(collection(guest, 'providerListings')), 'guest cannot list provider listings directly');
+  const provider = env.authenticatedContext('directory-mechanic').firestore();
+  await assertDeniedWithoutExpressionLimit(() => setDoc(doc(provider, 'publicProviderDirectory/forged-target'), {}), 'provider cannot forge another ID');
+  await assertDeniedWithoutExpressionLimit(() => updateDoc(doc(provider, 'publicProviderDirectory/directory-mechanic'), { phone: '09123456789' }), 'directory entries cannot gain private fields');
+  await assertDeniedWithoutExpressionLimit(() => deleteDoc(doc(provider, 'publicProviderDirectory/directory-mechanic')), 'directory entries cannot be removed by clients');
+});
+
 test('phone-field protections block new provider phones and admin lifecycle rewrites', async () => {
   await env.withSecurityRulesDisabled(async context => {
     const db = context.firestore();
@@ -641,4 +725,78 @@ test('phone-field protections block new provider phones and admin lifecycle rewr
   };
   await assertDeniedWithoutExpressionLimit(() => setDoc(doc(provider, 'providerListings/phone-new'), phoneListing), 'new listing cannot contain contactPhone');
   await assertDeniedWithoutExpressionLimit(() => updateDoc(doc(admin(), 'providerListings/m'), { contactPhone: '09123456789' }), 'admin cannot reintroduce contactPhone during listing lifecycle updates');
+});
+
+test('scheduled mechanic and towing services cannot start before their appointment time', async () => {
+  const future = Timestamp.fromMillis(Date.now() + 3600000);
+  const due = Timestamp.fromMillis(Date.now() - 3600000);
+  await env.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    for (const [uid, role] of [['m', roles.m], ['t', roles.t]]) {
+      await setDoc(doc(db, `users/${uid}`), { uid, role, accountStatus: 'active' });
+      await setDoc(doc(db, paths[uid]), { uid, role, verificationStatus: 'VERIFIED' });
+      await setDoc(doc(db, `bookings/future-${uid}`), {
+        bookingType: role, customerId: 'o', providerId: uid, status: 'accepted',
+        timingMode: 'scheduled', scheduledAt: future,
+      });
+      await setDoc(doc(db, `bookings/due-${uid}`), {
+        bookingType: role, customerId: 'o', providerId: uid, status: 'accepted',
+        timingMode: 'scheduled', scheduledAt: due,
+      });
+    }
+  });
+  for (const uid of ['m', 't']) {
+    const db = env.authenticatedContext(uid).firestore();
+    await assertDeniedWithoutExpressionLimit(
+      () => updateDoc(doc(db, `bookings/future-${uid}`), { status: 'en_route', updatedAt: serverTimestamp() }),
+      `${uid}: future scheduled service cannot start early`,
+    );
+    await assertSucceeds(updateDoc(doc(db, `bookings/due-${uid}`), { status: 'en_route', updatedAt: serverTimestamp() }));
+  }
+});
+
+test('complaints grant reporter/admin reads only and restrict admin updates to review fields with required decisions', async () => {
+  const bookingId = 'admin-complaint-booking';
+  await env.withSecurityRulesDisabled(async context => {
+    await setDoc(doc(context.firestore(), `bookings/${bookingId}`), { bookingType: 'onsite-mechanic', customerId: 'report-owner', providerId: 'report-provider', status: 'in_progress' });
+  });
+  const reportId = `${bookingId}_report-owner`;
+  const payload = { bookingId, bookingType: 'onsite-mechanic', bookingStatusAtSubmission: 'in_progress', bookingReference: bookingId,
+    reporterId: 'report-owner', reporterName: 'Owner', reporterType: 'Vehicle Owner',
+    reportedUserId: 'report-provider', reportedUserName: 'Provider', category: 'Service quality', explanation: 'Please review this service concern.',
+    status: 'Pending', createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
+  const owner = env.authenticatedContext('report-owner').firestore();
+  await assertSucceeds(setDoc(doc(owner, `complaints/${reportId}`), payload));
+  await assertSucceeds(getDoc(doc(owner, `complaints/${reportId}`)));
+  await assertDeniedWithoutExpressionLimit(() => getDoc(doc(env.authenticatedContext('report-provider').firestore(), `complaints/${reportId}`)), 'reported party cannot read the report');
+  await assertDeniedWithoutExpressionLimit(() => getDoc(doc(env.authenticatedContext('unrelated-user').firestore(), `complaints/${reportId}`)), 'unrelated user cannot read the report');
+  await assertSucceeds(getDocs(collection(admin(), 'complaints')));
+  const adminRef = doc(admin(), `complaints/${reportId}`);
+  await assertDeniedWithoutExpressionLimit(() => updateDoc(adminRef, { status: 'Resolved', adminNote: '', reviewedAt: serverTimestamp(), updatedAt: serverTimestamp() }), 'resolution requires an admin note');
+  await assertSucceeds(updateDoc(adminRef, { status: 'Under Review', adminNote: '', reviewedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  await assertDeniedWithoutExpressionLimit(() => updateDoc(adminRef, { status: 'Resolved', adminNote: 'Reviewed.', reviewedAt: serverTimestamp(), updatedAt: serverTimestamp(), reportedUserId: 'changed' }), 'admin cannot change report identity');
+  await assertSucceeds(updateDoc(adminRef, { status: 'Resolved', adminNote: 'Reviewed and decision recorded.', reviewedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  await assertDeniedWithoutExpressionLimit(() => updateDoc(doc(owner, `complaints/${reportId}`), { status: 'Dismissed', adminNote: 'Owner tries to decide', reviewedAt: serverTimestamp(), updatedAt: serverTimestamp() }), 'reporter cannot update the report');
+  assert.equal((await getDoc(doc(owner, `bookings/${bookingId}`))).data().status, 'in_progress', 'complaint review does not update booking status');
+});
+
+test('demo subscription data stays provider/admin private and profile updates cannot alter subscription fields', async () => {
+  const uid = 'm';
+  const historyId = 'demo-admin-history';
+  await env.withSecurityRulesDisabled(async context => {
+    await setDoc(doc(context.firestore(), `users/${uid}`), {
+      uid, role: roles.m, subscription: { status: 'active', plan: 'monthly', demoAmount: 100, expiresAt: Timestamp.fromMillis(Date.now() + 86400000) },
+    });
+    await setDoc(doc(context.firestore(), `users/${uid}/demoSubscriptionTransactions/${historyId}`), {
+      providerId: uid, transactionId: historyId, plan: 'monthly', demoAmount: 100, durationDays: 30,
+      type: 'activation', startedAt: Timestamp.now(), expiresAt: Timestamp.fromMillis(Date.now() + 86400000), createdAt: Timestamp.now(), label: 'demo_only',
+    });
+  });
+  const provider = env.authenticatedContext(uid).firestore();
+  const other = env.authenticatedContext('ordinary').firestore();
+  await assertSucceeds(getDoc(doc(provider, `users/${uid}/demoSubscriptionTransactions/${historyId}`)));
+  await assertDeniedWithoutExpressionLimit(() => getDoc(doc(other, `users/${uid}/demoSubscriptionTransactions/${historyId}`)), 'another account cannot read subscription history');
+  await assertDeniedWithoutExpressionLimit(() => updateDoc(doc(provider, `users/${uid}`), { subscription: { status: 'active', plan: 'yearly' } }), 'provider cannot change subscription through normal profile update');
+  await assertSucceeds(getDoc(doc(admin(), `users/${uid}/demoSubscriptionTransactions/${historyId}`)));
+  await assertSucceeds(getDoc(doc(admin(), `users/${uid}`)));
 });
