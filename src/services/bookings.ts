@@ -1,6 +1,7 @@
 import type { Query, QueryConstraint, QueryDocumentSnapshot } from 'firebase/firestore';
 import { auth, getDb } from '../lib/firebase';
 import { hasAdminClaim } from '../lib/authorization';
+import { loadPublishedProviderCounts, providerRoles, reportWindow } from './reports';
 
 export type BookingStatus = 'pending' | 'accepted' | 'vehicle_arrived' | 'diagnosing' | 'repairing' | 'en_route' | 'arrived' | 'in_progress' | 'completed' | 'rejected' | 'cancelled' | 'unknown';
 export interface RecentBooking {
@@ -20,6 +21,111 @@ export interface DashboardMetrics {
   activeProviders: number;
   totalBookings: number;
   providersByType: { role: string; count: number }[];
+}
+
+export interface DemoDashboardMetrics {
+  collectionsThisMonth: number;
+  activeSubscriptions: number;
+  monthLabel: string;
+}
+interface DemoMetricAccount {
+  id: string;
+  data: Record<string, unknown>;
+  transactions: { id: string; data: Record<string, unknown> }[];
+}
+
+const demoProviderRoles = ['onsite-mechanic', 'shop-owner', 'towing-company', 'homegarage'];
+
+/** Philippine calendar months use UTC+08:00, independent of the browser timezone. */
+export function demoMonthBounds(now: Date) {
+  if (!Number.isFinite(now.getTime())) throw new Error('Invalid demo metrics date.');
+  const local = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  const year = local.getUTCFullYear();
+  const month = local.getUTCMonth();
+  return {
+    start: new Date(Date.UTC(year, month, 1) - 8 * 60 * 60 * 1000),
+    end: new Date(Date.UTC(year, month + 1, 1) - 8 * 60 * 60 * 1000),
+  };
+}
+
+function demoTimestamp(value: unknown): number | null {
+  if (!value || typeof value !== 'object' || !('toDate' in value) || typeof value.toDate !== 'function') return null;
+  const date: unknown = value.toDate();
+  return date instanceof Date && Number.isFinite(date.getTime()) ? date.getTime() : null;
+}
+
+function validDemoPlan(data: Record<string, unknown>): boolean {
+  return (data.plan === 'monthly' && data.demoAmount === 100)
+    || (data.plan === 'yearly' && data.demoAmount === 1000);
+}
+
+/** Only committed demo history contributes collections; sync attempts have no history row. */
+export function summarizeDemoDashboard(accounts: DemoMetricAccount[], now = new Date()): DemoDashboardMetrics {
+  const { start, end } = demoMonthBounds(now);
+  const seenTransactions = new Set<string>();
+  const activeProviders = new Set<string>();
+  let collectionsThisMonth = 0;
+  for (const account of accounts) {
+    if (!demoProviderRoles.includes(String(account.data.role))) continue;
+    const raw = account.data.subscription;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const subscription = raw as Record<string, unknown>;
+      const expiresAt = demoTimestamp(subscription.expiresAt);
+      const startedAt = demoTimestamp(subscription.startedAt);
+      if (subscription.status === 'active' && validDemoPlan(subscription)
+        && typeof subscription.lastTransactionId === 'string' && subscription.lastTransactionId.length > 0
+        && startedAt !== null && startedAt <= now.getTime()
+        && expiresAt !== null && expiresAt > now.getTime()) activeProviders.add(account.id);
+    }
+    for (const transaction of account.transactions) {
+      const data = transaction.data;
+      const createdAt = demoTimestamp(data.createdAt);
+      const startedAt = demoTimestamp(data.startedAt);
+      const expiresAt = demoTimestamp(data.expiresAt);
+      const durationDays = data.plan === 'monthly' ? 30 : 365;
+      if (data.label !== 'demo_only' || !validDemoPlan(data)
+        || !['activation', 'renewal'].includes(String(data.type))
+        || data.providerId !== account.id || data.transactionId !== transaction.id
+        || !transaction.id || data.durationDays !== durationDays
+        // The existing committed schema has no payment status; do not accept failed-status records.
+        || data.status !== undefined
+        || createdAt === null || startedAt !== createdAt || expiresAt === null
+        || Math.abs(expiresAt - createdAt - durationDays * 86400000) > 120000
+        || createdAt < start.getTime() || createdAt >= end.getTime() || createdAt > now.getTime()) continue;
+      const key = `${account.id}/${transaction.id}`;
+      if (seenTransactions.has(key)) continue;
+      seenTransactions.add(key);
+      collectionsThisMonth += data.demoAmount as number;
+    }
+  }
+  return {
+    collectionsThisMonth,
+    activeSubscriptions: activeProviders.size,
+    monthLabel: new Intl.DateTimeFormat('en-PH', { month: 'long', year: 'numeric', timeZone: 'Asia/Manila' }).format(now),
+  };
+}
+
+export async function loadDemoDashboardMetrics(): Promise<DemoDashboardMetrics> {
+  const user = auth?.currentUser;
+  if (!user || !hasAdminClaim((await user.getIdTokenResult()).claims) || auth?.currentUser?.uid !== user.uid) {
+    throw new Error('Administrator access could not be verified. Sign in again.');
+  }
+  const { collection, getDocsFromServer, query, where } = await import('firebase/firestore');
+  const db = await getDb();
+  const now = new Date();
+  const { start, end } = demoMonthBounds(now);
+  const providers = await getDocsFromServer(query(collection(db, 'users'), where('role', 'in', demoProviderRoles)));
+  const accounts: DemoMetricAccount[] = [];
+  // Bound concurrent reads and use per-provider paths supported by the existing rules.
+  for (let index = 0; index < providers.docs.length; index += 10) {
+    accounts.push(...await Promise.all(providers.docs.slice(index, index + 10).map(async provider => {
+      const history = await getDocsFromServer(query(collection(db, 'users', provider.id, 'demoSubscriptionTransactions'),
+        where('createdAt', '>=', start), where('createdAt', '<', end)));
+      return { id: provider.id, data: provider.data(), transactions: history.docs.map(item => ({ id: item.id, data: item.data() })) };
+    })));
+  }
+  if (auth?.currentUser?.uid !== user.uid) throw new Error('Administrator session changed. Sign in again.');
+  return summarizeDemoDashboard(accounts, now);
 }
 export type ProviderDirectoryRole = 'onsite-mechanic' | 'shop-owner' | 'towing-company' | 'homegarage' | 'owner';
 export interface ProviderListing {
@@ -215,11 +321,12 @@ export async function loadBookingActivity(now = new Date()): Promise<BookingActi
   const { collection, getCountFromServer, query, where } = await import('firebase/firestore');
   const db = await getDb();
   const bookings = collection(db, 'bookings');
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const days = Array.from({ length: 7 }, (_, index) => new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6 + index));
-  return Promise.all(days.map(async date => {
-    const nextDate = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
-    const snapshot = await getCountFromServer(query(bookings, where('createdAt', '>=', date), where('createdAt', '<', nextDate)));
+  const { start, end } = reportWindow('7 days', now);
+  const days = Array.from({ length: 7 }, (_, index) => new Date(start.getTime() + index * 86400000));
+  return Promise.all(days.map(async (date, index) => {
+    const upperBound = index === 6 ? end : new Date(date.getTime() + 86400000);
+    const snapshot = await getCountFromServer(query(bookings, where('createdAt', '>=', date),
+      where('createdAt', index === 6 ? '<=' : '<', upperBound)));
     return { date, count: snapshot.data().count };
   }));
 }
@@ -233,23 +340,20 @@ export async function loadDashboardMetrics(): Promise<DashboardMetrics> {
   const db = await getDb();
   const count = async (collectionRef: Query, ...filters: QueryConstraint[]) =>
     (await getCountFromServer(query(collectionRef, ...filters))).data().count;
-  const listings = collection(db, 'providerListings');
-  const activeFilter = where('visibility', '==', 'active');
-  const roles = ['onsite-mechanic', 'shop-owner', 'towing-company'];
-  const [totalUsers, mechanicsPending, towingPending, shopsPending, totalBookings, ...providerCounts] = await Promise.all([
+  const [totalUsers, mechanicsPending, towingPending, shopsPending, totalBookings, providerCounts] = await Promise.all([
     count(collection(db, 'users')),
     count(collectionGroup(db, 'providerProfile'), where('verificationStatus', '==', 'PENDING')),
     count(collectionGroup(db, 'towingCompanyProfile'), where('verificationStatus', '==', 'PENDING')),
     count(collection(db, 'providers'), where('role', '==', 'shop-owner'), where('verificationStatus', '==', 'PENDING')),
     count(collection(db, 'bookings')),
-    ...roles.map(role => count(listings, activeFilter, where('role', '==', role))),
+    loadPublishedProviderCounts(db),
   ]);
   return {
     totalUsers,
     pendingVerifications: mechanicsPending + towingPending + shopsPending,
     activeProviders: providerCounts.reduce((sum, value) => sum + value, 0),
     totalBookings,
-    providersByType: roles.map((role, index) => ({ role, count: providerCounts[index] })),
+    providersByType: providerRoles.map((role, index) => ({ role, count: providerCounts[index] })),
   };
 }
 
@@ -677,8 +781,9 @@ export async function updateProviderAccountStatus(provider: ProviderListing, nex
 
 export function bookingError(error: unknown): string {
   const code = (error as { code?: string })?.code;
-  if (code === 'permission-denied') return 'Admin data access was denied. Deploy the latest Firestore rules and confirm your admin claim.';
+  if (code === 'permission-denied') return 'Admin data access was denied by the current permissions. Confirm your administrator access.';
+  if (code === 'unauthenticated') return 'Your administrator session has expired. Sign in again.';
   if (code === 'failed-precondition') return 'Firestore could not run this query. Check the Firebase console for a required index.';
-  if (code === 'unavailable') return 'Could not reach Firestore. Check your connection and retry.';
-  return error instanceof Error && !code ? error.message : 'Could not load recent bookings. Refresh and try again.';
+  if (code === 'unavailable' || code === 'deadline-exceeded') return 'Could not reach Firestore. Check your connection and retry.';
+  return error instanceof Error && !code ? error.message : 'Could not load Admin data. Refresh and try again.';
 }

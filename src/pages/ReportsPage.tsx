@@ -1,134 +1,98 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { completionPercent, formatReportRating, reportCsv, loadActivityReport, type ActivityReport, type ReportRange } from '../services/reports';
+import { bookingError } from '../services/bookings';
 import { BarChart3, CalendarDays, CheckCircle2, Download, Star, Users } from 'lucide-react';
 
-type Range = '7 days' | '30 days' | '90 days';
-
-const sample = {
-  '7 days': {
-    period: 'Oct 12–18, 2026',
-    bookings: 186,
-    completed: 148,
-    labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-    trend: [19, 24, 21, 29, 31, 34, 28],
-    categories: [
-      { label: 'Onsite Mechanics', value: 88, color: 'bg-brand' },
-      { label: 'Auto Shops', value: 57, color: 'bg-red-300' },
-      { label: 'Towing Companies', value: 41, color: 'bg-slate-400' },
-    ],
-  },
-  '30 days': {
-    period: 'Sep 19–Oct 18, 2026',
-    bookings: 742,
-    completed: 601,
-    labels: ['Sep 19', 'Sep 24', 'Sep 29', 'Oct 04', 'Oct 09', 'Oct 14', 'Oct 18'],
-    trend: [82, 94, 103, 111, 119, 126, 107],
-    categories: [
-      { label: 'Onsite Mechanics', value: 346, color: 'bg-brand' },
-      { label: 'Auto Shops', value: 231, color: 'bg-red-300' },
-      { label: 'Towing Companies', value: 165, color: 'bg-slate-400' },
-    ],
-  },
-  '90 days': {
-    period: 'Jul 21–Oct 18, 2026',
-    bookings: 2148,
-    completed: 1742,
-    labels: ['Jul 21', 'Aug 05', 'Aug 20', 'Sep 04', 'Sep 19', 'Oct 04', 'Oct 18'],
-    trend: [208, 243, 271, 296, 324, 385, 421],
-    categories: [
-      { label: 'Onsite Mechanics', value: 1004, color: 'bg-brand' },
-      { label: 'Auto Shops', value: 669, color: 'bg-red-300' },
-      { label: 'Towing Companies', value: 475, color: 'bg-slate-400' },
-    ],
-  },
-} satisfies Record<Range, {
-  period: string;
-  bookings: number;
-  completed: number;
-  labels: string[];
-  trend: number[];
-  categories: { label: string; value: number; color: string }[];
-}>;
-
-function downloadCsv(range: Range, report: typeof sample[Range]) {
-  const rows = [
-    ['VeResc mock report', report.period],
-    ['Metric', 'Sample value'],
-    ['Bookings', String(report.bookings)],
-    ['Completed bookings', String(report.completed)],
-    ['Completion rate', `${Math.round(report.completed / report.bookings * 100)}%`],
-    [],
-    ['Provider category', 'Bookings'],
-    ...report.categories.map(item => [item.label, String(item.value)]),
-  ];
-  const csv = rows.map(row => row.map(value => `"${String(value ?? '').replaceAll('"', '""')}"`).join(',')).join('\r\n');
+function downloadCsv(range: ReportRange, report: ActivityReport) {
+  const csv = reportCsv(report);
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
   const link = document.createElement('a');
   link.href = url;
-  link.download = `veresc-mock-report-${range.replace(' ', '-')}.csv`;
+  link.download = `veresc-report-${range.replace(' ', '-')}.csv`;
   link.click();
   URL.revokeObjectURL(url);
 }
 
 export function ReportsPage() {
-  const [range, setRange] = useState<Range>('30 days');
-  const report = useMemo(() => sample[range], [range]);
-  const maxTrend = Math.max(...report.trend);
-  const completionRate = Math.round(report.completed / report.bookings * 100);
-  const totalByCategory = report.categories.reduce((total, item) => total + item.value, 0);
-  const chartAria = report.labels.map((label, index) => `${label}: ${report.trend[index]} bookings`).join(', ');
+  const [range, setRange] = useState<ReportRange>('30 days');
+  const [result, setResult] = useState<{ range: ReportRange; report: ActivityReport } | null>(null);
+  const [failure, setFailure] = useState<{ range: ReportRange; message: string } | null>(null);
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setResult(null);
+    setFailure(null);
+    void loadActivityReport(range).then(report => {
+      if (active) setResult({ range, report });
+    }, error => {
+      if (active) setFailure({ range, message: bookingError(error) });
+    });
+    return () => { active = false; };
+  }, [range, refresh]);
+  const report = result?.range === range ? result.report : null;
+  const error = failure?.range === range ? failure.message : '';
+  const maxTrend = Math.max(1, ...(report?.trend ?? []));
+  const completionRate = report ? completionPercent(report) : 0;
+  const totalByCategory = report?.categories.reduce((total, item) => total + item.value, 0) ?? 0;
+  const chartAria = report?.intervals.map((label, index) => `${label}: ${report.trend[index]} bookings`).join(', ') ?? '';
+  const largest = report?.categories.reduce<ActivityReport['categories'][number] | null>((best, item) => !best || item.value > best.value ? item : best, null);
 
   return <div className="space-y-6">
     <header className="flex flex-wrap items-start justify-between gap-4">
       <div>
         <p className="mb-2 text-[10px] font-semibold tracking-[.16em] text-slate-400">OPERATIONS INSIGHTS</p>
         <h2 className="flex items-center gap-2 text-2xl font-semibold tracking-tight"><BarChart3 size={23} className="text-brand" />Reports</h2>
-        <p className="mt-2 text-xs text-slate-500">Sample booking and provider activity for presentation purposes.</p>
+        <p className="mt-2 text-xs text-slate-500">Booking activity and customer reviews from recorded service data.</p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500">
           <CalendarDays size={14} />
           <span className="sr-only">Report period</span>
-          <select className="bg-transparent outline-none" value={range} onChange={event => setRange(event.target.value as Range)}>
+          <select className="bg-transparent outline-none" value={range} onChange={event => setRange(event.target.value as ReportRange)}>
             <option value="7 days">Last 7 days</option><option value="30 days">Last 30 days</option><option value="90 days">Last 90 days</option>
           </select>
         </label>
-        <button type="button" className="secondary inline-flex items-center gap-2" onClick={() => downloadCsv(range, report)}><Download size={14} />Export CSV</button>
+        <button type="button" className="secondary inline-flex items-center gap-2" disabled={!report} onClick={() => { if (report) downloadCsv(range, report); }}><Download size={14} />Export CSV</button>
       </div>
     </header>
 
+    {!report && !error && <p role="status" className="admin-panel p-8 text-sm text-slate-500">Loading report…</p>}
+    {error && <p role="alert" className="notice">Report unavailable: {error} <button type="button" className="ml-2 underline" onClick={() => { setFailure(null); setResult(null); setRefresh(value => value + 1); }}>Retry report</button></p>}
+    {report && <>
     <div role="note" className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
-      <span><strong>MOCK REPORT</strong> — These figures are fictional examples and are not read from Firestore.</span>
+      <span><strong>RECORDED DATA</strong> — Service bookings created in this period; statuses reflect the latest stored state.</span>
       <span>{report.period}</span>
     </div>
 
-    <section aria-label="Sample report summary" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    {report.bookings === 0 && <p role="status" className="admin-panel p-5 text-sm text-slate-500">No service bookings were created in this period.</p>}
+    <section aria-label="Report summary" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard label="Bookings" value={report.bookings.toLocaleString()} detail={`During ${range}`} icon={CalendarDays} />
-      <MetricCard label="Completed" value={report.completed.toLocaleString()} detail={`${completionRate}% completion rate`} icon={CheckCircle2} />
-      <MetricCard label="Active providers" value="164" detail="Across service categories" icon={Users} />
-      <MetricCard label="Average rating" value="4.7 / 5" detail="Sample customer rating" icon={Star} />
+      <MetricCard label="Completed" value={report.completed.toLocaleString()} detail={report.bookings ? `${completionRate}% completion rate` : 'No bookings in this period'} icon={CheckCircle2} />
+      <MetricCard label="Active providers" value={report.activeProviders.toLocaleString()} detail="Published listings across all four provider roles, including Home Garage; independent of date range" icon={Users} />
+      <MetricCard label="Average rating" value={report.averageRating === null ? 'No reviews' : `${formatReportRating(report.averageRating)} / 5`} detail={`${report.reviewCount} valid customer reviews submitted in this period`} icon={Star} />
     </section>
 
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(300px,1fr)]">
       <section className="admin-panel min-w-0">
-        <div className="admin-section-heading"><div><h3>Booking activity</h3><p>Sample bookings across the selected period</p></div><span className="rounded bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800">MOCK</span></div>
+        <div className="admin-section-heading"><div><h3>Booking activity</h3><p>Bookings created across the selected period</p></div></div>
         <div className="px-5 pb-5">
           <div className="mb-4 flex items-end justify-between"><strong className="text-3xl font-semibold tabular-nums">{report.bookings.toLocaleString()}</strong><span className="text-xs text-slate-400">total bookings</span></div>
-          <div role="img" aria-label={`Mock booking activity: ${chartAria}.`} className="flex h-52 items-end gap-2 border-b border-slate-200 px-1 sm:gap-4">
-            {report.trend.map((value, index) => <div key={report.labels[index]} className="relative flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-1 pb-5">
+          <div role="img" aria-label={`Booking activity: ${chartAria}.`} className="flex h-52 items-end gap-2 border-b border-slate-200 px-1 sm:gap-4">
+            {report.trend.map((value, index) => <div key={report.intervals[index]} className="relative flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-1 pb-5">
               <span className="text-[9px] font-medium text-slate-500">{value}</span>
-              <div title={`${report.labels[index]}: ${value} bookings`} className={`w-full max-w-12 rounded-t-sm ${index === report.trend.length - 1 ? 'bg-brand' : 'bg-red-200'}`} style={{ height: `${Math.max(5, value / maxTrend * 70)}%` }} />
+              <div title={`${report.intervals[index]}: ${value} bookings`} className={`w-full max-w-12 rounded-t-sm ${index === report.trend.length - 1 ? 'bg-brand' : 'bg-red-200'}`} style={{ height: `${value / maxTrend * 70}%` }} />
               <span className="absolute bottom-1 whitespace-nowrap text-[9px] text-slate-400">{report.labels[index]}</span>
             </div>)}
           </div>
-          <p className="mt-4 text-[10px] text-slate-400">Each bar represents a sample interval, not a live count.</p>
+          <p className="mt-4 text-[10px] text-slate-400">Intervals use Philippine calendar days. Today includes records up to the report load time.</p>
         </div>
       </section>
 
       <section className="admin-panel min-w-0">
-        <div className="admin-section-heading"><div><h3>Bookings by provider</h3><p>Sample category distribution</p></div><span className="rounded bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800">MOCK</span></div>
+        <div className="admin-section-heading"><div><h3>Bookings by provider</h3><p>Recorded service category distribution</p></div></div>
         <div className="space-y-5 px-5 pb-5">
           {report.categories.map(item => {
-            const percent = Math.round(item.value / totalByCategory * 100);
+            const percent = (totalByCategory ? Math.round(item.value / totalByCategory * 100) : 0);
             return <div key={item.label}>
               <div className="mb-2 flex items-center gap-2 text-xs"><span className={`h-2.5 w-2.5 rounded-sm ${item.color}`} /><span className="flex-1 text-slate-600">{item.label}</span><strong>{item.value.toLocaleString()}</strong><span className="w-10 text-right text-slate-400">{percent}%</span></div>
               <div className="h-2 overflow-hidden rounded bg-slate-100"><div className={`h-full ${item.color}`} style={{ width: `${percent}%` }} /></div>
@@ -140,13 +104,14 @@ export function ReportsPage() {
     </div>
 
     <section className="admin-panel overflow-hidden">
-      <div className="admin-section-heading"><div><h3>Report notes</h3><p>Example operational summary</p></div></div>
+      <div className="admin-section-heading"><div><h3>Report notes</h3><p>Scope and interpretation</p></div></div>
       <div className="grid gap-4 px-5 pb-5 text-xs leading-5 text-slate-600 md:grid-cols-3">
-        <p className="rounded border border-slate-100 p-4">Sample completion is {completionRate}%. Completed means a booking reached its completed status.</p>
-        <p className="rounded border border-slate-100 p-4">Onsite Mechanics are the largest sample booking category in this report period.</p>
-        <p className="rounded border border-slate-100 p-4">Replace these fixtures with an authorized live reporting query when report data is ready.</p>
+        <p className="rounded border border-slate-100 p-4">{report.bookings ? `Completion is ${completionRate}% among bookings created in this period, using their current stored status.` : 'Completion rate is unavailable because no bookings were created in this period.'}</p>
+        <p className="rounded border border-slate-100 p-4">{largest && largest.value > 0 ? `${largest.label} is a largest booking category with ${largest.value.toLocaleString()} bookings.` : 'No service bookings recorded in this period.'}</p>
+        <p className="rounded border border-slate-100 p-4">Bookings include mechanics, shops, towing, and home garage service requests. Parking sessions are excluded from booking totals by current Admin permissions. Ratings cover reviews submitted in this period, including reviews of older bookings and parking sessions. Active providers are listings with visibility set to active.</p>
       </div>
     </section>
+    </>}
   </div>;
 }
 

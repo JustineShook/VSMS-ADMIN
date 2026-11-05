@@ -1,19 +1,27 @@
 @import "tailwindcss";
-@theme { --color-brand: #bd2333; }
+@theme { --color-brand: #0f52ba; }
 @layer base {
   body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #172033; -webkit-font-smoothing: antialiased; }
   button, a, input { -webkit-tap-highlight-color: transparent; }
   button { cursor: pointer; }
   button:disabled { cursor: wait; opacity: .65; }
-  :focus-visible { outline: 3px solid #bd233380; outline-offset: 3px; }
+  :focus-visible { outline: 3px solid #0f52ba80; outline-offset: 3px; }
 }
 @layer components {
   .eyebrow { @apply text-[10px] font-bold tracking-[0.18em] text-brand; }
-  .field { @apply w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand focus:outline-2 focus:outline-red-100 disabled:bg-slate-50; }
-  .field[aria-invalid="true"] { @apply border-brand; }
-  .primary { @apply inline-flex min-h-12 items-center justify-center gap-2 rounded-lg bg-brand px-5 py-3 text-sm font-semibold text-white hover:bg-red-800 disabled:hover:bg-brand; }
+  .field { @apply w-full rounded-lg border border-slate-300 bg-white px-3.5 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand focus:outline-2 focus:outline-blue-100 disabled:bg-slate-50; }
+  .field[aria-invalid="true"] { @apply border-red-600; }
+  .primary { @apply inline-flex min-h-12 items-center justify-center gap-2 rounded-lg bg-brand px-5 py-3 text-sm font-semibold text-white hover:bg-blue-900 disabled:hover:bg-brand; }
   .secondary { @apply inline-flex min-h-12 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-5 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50; }
   .notice { @apply rounded-lg border border-red-200 bg-red-50 p-4 text-sm leading-6 text-red-800; }
+  .auth-shell .eyebrow { color: #0f52ba; }
+  .auth-shell .field { padding-block: 0.625rem; }
+  .auth-shell .field:focus { border-color: #0f52ba; outline-color: #dbeafe; }
+  .auth-shell .field[aria-invalid="true"] { border-color: #dc2626; }
+  .auth-shell .primary { background-color: #0f52ba; }
+  .auth-shell .primary:hover:not(:disabled) { background-color: #1e3a8a; }
+  .auth-shell :focus-visible { outline: 3px solid #0f52ba80; outline-offset: 3px; }
+  [id$="-error"] { color: #b91c1c; }
 }
 @media (prefers-reduced-motion: reduce) { .animate-spin { animation: none; } }
 

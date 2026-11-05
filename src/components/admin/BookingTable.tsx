@@ -22,7 +22,7 @@ export function BookingTable() {
   useEffect(() => { void load(); }, [load]);
 
   return <section id="recent-bookings" className="admin-panel min-w-0 scroll-mt-6">
-    <div className="admin-section-heading"><div><h2>Recent bookings <span className="ml-1 rounded bg-red-50 px-1.5 py-0.5 text-[10px] text-brand">LIVE FIRESTORE</span></h2><p>Latest service requests across all providers</p></div><button className="admin-icon" onClick={() => void load()} disabled={busy} aria-label="Refresh recent bookings"><RefreshCw size={17} className={busy ? 'animate-spin' : ''} /></button></div>
+    <div className="admin-section-heading"><div><h2>Recent bookings <span className="ml-1 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] text-brand">LIVE FIRESTORE</span></h2><p>Latest service requests across all providers</p></div><button className="admin-icon" onClick={() => void load()} disabled={busy} aria-label="Refresh recent bookings"><RefreshCw size={17} className={busy ? 'animate-spin' : ''} /></button></div>
     {error && <p role="alert" className="notice mx-5 mb-4">{error}</p>}
     {busy && <p role="status" className="px-5 pb-4 text-sm text-slate-500">Loading recent bookings…</p>}
     {!busy && !error && rows.length === 0 && <p className="px-5 pb-5 text-sm text-slate-500">No bookings have been recorded yet.</p>}

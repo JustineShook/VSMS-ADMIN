@@ -12,7 +12,7 @@ export function Header({ name, email, onMenu, onNotifications, unreadCount = 0, 
     document.addEventListener('pointerdown', dismiss); document.addEventListener('keydown', escape);
     return () => { document.removeEventListener('pointerdown', dismiss); document.removeEventListener('keydown', escape); };
   }, [open]);
-  return <header className="flex h-20 shrink-0 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4 sm:px-8">
+  return <header className="flex h-20 shrink-0 items-center justify-between gap-4 border-b border-blue-100 bg-white px-4 sm:px-8">
     <div className="flex items-center gap-3"><button className="admin-icon lg:hidden" onClick={onMenu} aria-label="Open navigation"><Menu size={21} /></button><h1 className="text-lg font-semibold tracking-tight">{title}</h1></div>
     <div className="flex items-center gap-2 sm:gap-5">
       <label className="hidden items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-slate-400 md:flex"><Search size={16} /><input className="w-36 bg-transparent text-xs outline-none lg:w-44" placeholder="Search workspace…" aria-label="Search workspace (preview only)" disabled /><span className="text-[9px]">PREVIEW</span></label>

@@ -69,7 +69,7 @@ function AdminLayoutContent() {
   const sidebarProps = { name, signingOut, activeTarget, onLogout: () => void signOut(), onNavigate: () => {
     if (drawer.current?.open) drawer.current.close();
   } };
-  return <div className="admin-shell min-h-screen bg-[#f7f8fa]">
+  return <div className="admin-shell min-h-screen bg-[#f7f9fd]">
     <a href="#dashboard-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-2 focus:z-50 focus:bg-white focus:p-3">Skip to dashboard content</a>
     <aside className={`fixed inset-y-0 left-0 z-30 hidden border-r border-slate-200 lg:block ${collapsed ? 'w-20' : 'w-60'}`}><Sidebar {...sidebarProps} collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} /></aside>
     <dialog ref={drawer} aria-label="Administration navigation" className="admin-drawer" onClick={event => { if (event.target === drawer.current) drawer.current.close(); }}>

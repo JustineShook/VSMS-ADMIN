@@ -40,7 +40,7 @@ export function Sidebar({ collapsed = false, name, signingOut, onLogout, onToggl
       <div className="space-y-1">{navigation.map(({ label, icon: Icon, target }) =>
         <Link key={label} to={target.startsWith('/') ? target : `/admin#${target}`} aria-current={activeTarget === target ? 'page' : undefined}
           onClick={() => onNavigate(target)} title={label} aria-label={collapsed ? label : undefined}
-          className={`admin-nav ${collapsed ? 'justify-center px-2' : 'px-3'} ${activeTarget === target ? 'bg-red-50 font-semibold text-brand' : 'text-slate-500'}`}>
+          className={`admin-nav ${collapsed ? 'justify-center px-2' : 'px-3'} ${activeTarget === target ? 'bg-blue-50 font-semibold text-brand' : 'text-slate-500'}`}>
           <Icon size={18} strokeWidth={1.7} className="shrink-0" />
           {!collapsed && <span className="flex-1 text-left">{label}</span>}
         </Link>
